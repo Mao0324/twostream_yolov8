@@ -1,4 +1,4 @@
 # 测试
 from ultralytics import YOLO 
-model = YOLO('/home/mjy/ultralytics/runs/detect/pC2fmpf/weights/best.pt') 
-metrics = model.val(data='/home/mjy/ultralytics/data/drone2.yaml',split='test',imgsz=640,batch=16)
+model = YOLO('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/escvehicle_runs/train/weights/best.pt') 
+metrics = model.val(data='/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle.yaml',split='test',imgsz=704,batch=16)
