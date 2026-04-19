@@ -159,9 +159,9 @@ class BaseDataset(Dataset):
         """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
         
-        #f1=self.imir_files[i]
-        f1=self.im_files[i].replace('images','image')
-        imir=cv2.imread(f1)
+        # Read paired infrared image from explicit IR split file list.
+        f1 = self.imir_files[i]
+        imir = cv2.imread(f1)
         
         #imir=cv2.cvtColor(imir,cv2.COLOR_BGR2GRAY) #转化为i灰度图像
 
@@ -188,6 +188,8 @@ class BaseDataset(Dataset):
             # plt.close()
 
             # cv2.imwrite('/home/mjy/ultralytics/images/'+str(i)+'ir.jpg', imir) #保存
+            if imir is None:
+                raise FileNotFoundError(f"IR Image Not Found {f1}")
             im = np.dstack((im, imir))
             h0, w0 = im.shape[:2]  # orig hw
             if rect_mode:  # resize long side to imgsz while maintaining aspect ratio

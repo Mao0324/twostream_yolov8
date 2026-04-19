@@ -1,0 +1,22 @@
+# ESCVehicle dataset for TwoStream YOLOv8
+# Split source: /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/data.json
+# Visible/Infrared image pairs share the same filename and split assignment.
+
+train: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_train.txt
+val: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_val.txt
+test: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_test.txt
+
+train_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_train.txt
+val_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_val.txt
+test_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_test.txt
+escvehicle_visible_train.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_train.txt
+escvehicle_visible_val.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_val.txt
+escvehicle_visible_test.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_test.txt
+names:
+  0: car
+  1: truck
+  2: bus
+  3: van
+  4: freight car
+  5: suv
+  6: construction vehicle
