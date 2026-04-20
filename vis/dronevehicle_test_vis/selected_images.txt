@@ -1,0 +1,10 @@
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_00410.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_04507.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_04013.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_03658.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_02287.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_01680.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_08936.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_01425.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_06913.jpg
+/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/images/test/ir_00521.jpg

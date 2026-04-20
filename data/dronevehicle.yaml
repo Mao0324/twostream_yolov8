@@ -23,7 +23,7 @@ test: images/test
 
 train_ir: image/train
 val_ir: image/val
-test_ir: image/test
+test_ir: /home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/image/test
 
 names:
   0: car
