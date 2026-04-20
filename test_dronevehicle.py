@@ -19,7 +19,7 @@ def parse_args():
         default=str(default_data),
         help="Dataset yaml path (default: data/dronevehicle.yaml)",
     )
-    parser.add_argument("--imgsz", type=int, default=704, help="Validation image size")
+    parser.add_argument("--imgsz", type=int, default=640, help="Validation image size")
     parser.add_argument("--batch", type=int, default=16, help="Validation batch size")
     parser.add_argument("--device", type=str, default="0", help="CUDA device, e.g. 0 or 0,1")
     parser.add_argument("--project", type=str, default=None, help="Output project directory")
