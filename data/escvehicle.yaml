@@ -9,9 +9,10 @@ test: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_
 train_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_train.txt
 val_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_val.txt
 test_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_test.txt
-escvehicle_visible_train.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_train.txt
-escvehicle_visible_val.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_val.txt
-escvehicle_visible_test.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_visible_test.txt
+escvehicle_visible_train.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_train.txt
+escvehicle_visible_val.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_val.txt
+escvehicle_visible_test.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/escvehicle_infrared_test.txt
+
 names:
   0: car
   1: truck
