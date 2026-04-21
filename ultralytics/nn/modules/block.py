@@ -1639,7 +1639,8 @@ class CrossModalASSAFusion(nn.Module):
         hidden = (hidden // self.num_heads) * self.num_heads
         self.hidden = hidden if hidden > 0 else self.num_heads
         self.head_dim = self.hidden // self.num_heads
-        self.scale = self.head_dim ** -0.5
+        # 更接近 ASSA：使用可学习温度缩放注意力响应（按 head 独立学习）。
+        self.temperature = nn.Parameter(torch.ones(self.num_heads, 1, 1))
 
         # 新增分支A：RGB <- IR（Q 来自 RGB，K/V 来自 IR）
         self.rgb_q = nn.Conv2d(c, self.hidden, kernel_size=1, bias=False)
@@ -1661,8 +1662,9 @@ class CrossModalASSAFusion(nn.Module):
 
         self.rgb_out = nn.Conv2d(self.hidden, c, kernel_size=1, bias=False)
         self.ir_out = nn.Conv2d(self.hidden, c, kernel_size=1, bias=False)
-        self.gamma_rgb = nn.Parameter(torch.zeros(1))
-        self.gamma_ir = nn.Parameter(torch.zeros(1))
+        # 让新融合分支更早参与学习，避免训练初期近似退化为纯残差融合。
+        self.gamma_rgb = nn.Parameter(torch.tensor(0.1))
+        self.gamma_ir = nn.Parameter(torch.tensor(0.1))
         self.fuse = Conv(2 * c, c, k=1, s=1)
 
     def _reshape_q(self, x):
@@ -1676,7 +1678,10 @@ class CrossModalASSAFusion(nn.Module):
 
     def _sparse_cross_attn(self, q, k, v):
         # 新增核心：ASSA 风格 ReLU 稀疏选择（非 softmax），保留正相关响应并抑制无关干扰。
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        # 更接近 ASSA：先对 q/k 做 L2 归一化，再用可学习温度进行缩放。
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
         attn = F.relu(attn_logits)
         attn = attn / (attn.sum(dim=-1, keepdim=True) + self.eps)
         return torch.matmul(attn, v)
@@ -3067,6 +3072,5 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
 
 
