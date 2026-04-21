@@ -3,9 +3,6 @@
 import contextlib
 from copy import deepcopy
 from pathlib import Path
-
-from ultralytics.nn.modules import ADD, Concat, CMASSA, CrossModalASSAFusion
-
 import torch
 import torch.nn as nn
 
