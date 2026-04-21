@@ -49,6 +49,11 @@ from .block import (
     Concat2,
     S2Attention,
     ADD,
+
+    # 新增导入：跨模态 ASSA 融合模块；作用：提供给 tasks.py 进行模块解析与构图；用法：YAML 中可写 CMASSA。
+    CrossModalASSAFusion,
+    CMASSA,
+
     SimAM,
     ShuffleAttention,
     GAM_Attention,
@@ -165,4 +170,9 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
+    "ADD",
+    # 新增导出：允许外部 `from ultralytics.nn.modules import CMASSA`；
+    # 用法：模型配置直接引用 CMASSA / CrossModalASSAFusion。
+    "CrossModalASSAFusion",
+    "CMASSA",
 )

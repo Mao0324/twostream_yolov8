@@ -51,6 +51,11 @@ from ultralytics.nn.modules import (
     WorldDetect,
     Concat2,
     ADD,
+
+    # 新增导入：跨模态 ASSA 融合模块；作用：让 parse_model 能识别 CMASSA；用法：在 YAML 融合节点替换 ADD。
+    CrossModalASSAFusion,
+    CMASSA,
+
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -1057,10 +1062,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args[0] = d[args[0]]
             c1, c2 = [ch[x] for x in f], (sum([ch[x] for x in f]) if args[0] == 'concat' else ch[f[0]])
             args = [c1, args[0]]
-        elif m is ADD:
-#            print("ch[f]", f, ch[f[0]])
+        
+        # 新增解析分支：兼容 ADD 与跨模态 ASSA 融合。
+        # 作用：自动推导输入通道并补齐 CMASSA 的构造参数；
+        # 用法：`CMASSA, [reduction, kv_stride, num_heads]`，省略时默认 [2,4,1]。
+        elif m in {ADD, CrossModalASSAFusion, CMASSA}:
             c2 = ch[f[0]]
-            args = [c2]  
+            if m is ADD:
+                args = [c2]
+            else:
+                reduction = args[0] if len(args) > 0 else 2
+                kv_stride = args[1] if len(args) > 1 else 4
+                num_heads = args[2] if len(args) > 2 else 1
+                args = [c2, reduction, kv_stride, num_heads]
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]

@@ -14,7 +14,7 @@ results = model.train(
     batch=64,
     epochs=200,
     imgsz=640,
-    device='1,2,3,4',
+    device='3,4',
     project='/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs',
     task='obb'
 )

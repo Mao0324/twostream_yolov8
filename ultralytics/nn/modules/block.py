@@ -39,6 +39,11 @@ __all__ = (
     "Silence",
     "Concat2",
     "ADD",
+    
+    # 新增：跨模态 ASSA 融合模块名称导出；作用：供 YAML/parse_model 通过字符串构建；用法：在模型配置中写 CMASSA 或 CrossModalASSAFusion。
+    "CrossModalASSAFusion",
+    "CMASSA",
+
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1611,6 +1616,111 @@ class ADD(nn.Module):
   
     def forward(self, x):
         return torch.add(x[0], x[1])
+
+
+# 新增：CrossModalASSAFusion（跨模态 ASSA 融合）；
+# 作用：替换 RGB/IR 的简单 ADD，在同尺度特征上执行双向跨模态稀疏注意力融合；
+# 用法：YAML 中写 `CMASSA, [reduction, kv_stride, num_heads]`，例如 [2, 4, 1]。
+class CrossModalASSAFusion(nn.Module):
+    """Lightweight cross-modal ASSA-style fusion for RGB-IR feature pairs."""
+
+    def __init__(self, c, reduction=2, kv_stride=4, num_heads=1, eps=1e-6):
+        super().__init__()
+        # 新增参数说明：
+        # reduction: 通道压缩倍率（越大越轻量）；
+        # kv_stride: K/V 下采样步长（控制注意力复杂度，建议 P3/P4/P5 默认 4）；
+        # num_heads: 注意力头数（轻量版本默认 1）。
+        self.reduction = max(int(reduction), 1)
+        self.kv_stride = max(int(kv_stride), 1)
+        self.num_heads = max(int(num_heads), 1)
+        self.eps = eps
+
+        hidden = max(c // self.reduction, self.num_heads)
+        hidden = (hidden // self.num_heads) * self.num_heads
+        self.hidden = hidden if hidden > 0 else self.num_heads
+        self.head_dim = self.hidden // self.num_heads
+        self.scale = self.head_dim ** -0.5
+
+        # 新增分支A：RGB <- IR（Q 来自 RGB，K/V 来自 IR）
+        self.rgb_q = nn.Conv2d(c, self.hidden, kernel_size=1, bias=False)
+        self.ir_k_for_rgb = nn.Conv2d(c, self.hidden, kernel_size=1, bias=False)
+        self.ir_v_for_rgb = nn.Conv2d(c, self.hidden, kernel_size=1, bias=False)
+
+        # 新增分支B：IR <- RGB（Q 来自 IR，K/V 来自 RGB）
+        self.ir_q = nn.Conv2d(c, self.hidden, kernel_size=1, bias=False)
+        self.rgb_k_for_ir = nn.Conv2d(c, self.hidden, kernel_size=1, bias=False)
+        self.rgb_v_for_ir = nn.Conv2d(c, self.hidden, kernel_size=1, bias=False)
+
+        # Inject local cues before sparse cross-attention.
+        self.rgb_q_local = DWConv(self.hidden, self.hidden, k=3, act=False)
+        self.ir_q_local = DWConv(self.hidden, self.hidden, k=3, act=False)
+        self.rgb_k_local = DWConv(self.hidden, self.hidden, k=3, act=False)
+        self.ir_k_local = DWConv(self.hidden, self.hidden, k=3, act=False)
+        self.rgb_v_local = DWConv(self.hidden, self.hidden, k=3, act=False)
+        self.ir_v_local = DWConv(self.hidden, self.hidden, k=3, act=False)
+
+        self.rgb_out = nn.Conv2d(self.hidden, c, kernel_size=1, bias=False)
+        self.ir_out = nn.Conv2d(self.hidden, c, kernel_size=1, bias=False)
+        self.gamma_rgb = nn.Parameter(torch.zeros(1))
+        self.gamma_ir = nn.Parameter(torch.zeros(1))
+        self.fuse = Conv(2 * c, c, k=1, s=1)
+
+    def _reshape_q(self, x):
+        b, _, h, w = x.shape
+        x = x.view(b, self.num_heads, self.head_dim, h * w).transpose(-2, -1)
+        return x, h, w
+
+    def _reshape_kv(self, x):
+        b, _, h, w = x.shape
+        return x.view(b, self.num_heads, self.head_dim, h * w).transpose(-2, -1)
+
+    def _sparse_cross_attn(self, q, k, v):
+        # 新增核心：ASSA 风格 ReLU 稀疏选择（非 softmax），保留正相关响应并抑制无关干扰。
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn = F.relu(attn_logits)
+        attn = attn / (attn.sum(dim=-1, keepdim=True) + self.eps)
+        return torch.matmul(attn, v)
+
+    def _cross_modal_update(self, q_src, k_src, v_src):
+        q, h, w = self._reshape_q(q_src)
+        k = self._reshape_kv(k_src)
+        v = self._reshape_kv(v_src)
+        out = self._sparse_cross_attn(q, k, v)
+        return out.transpose(-2, -1).contiguous().view(q_src.shape[0], self.hidden, h, w)
+
+    def forward(self, x):
+        # 用法：x 必须是长度为2的列表/元组 `[f_rgb, f_ir]`，且 shape 均为 [B, C, H, W]。
+        rgb, ir = x
+
+        # 新增：先做 RGB <- IR 的跨模态增强。
+        q_rgb = self.rgb_q_local(self.rgb_q(rgb))
+        ir_kv = F.avg_pool2d(ir, kernel_size=self.kv_stride, stride=self.kv_stride, ceil_mode=True) if self.kv_stride > 1 else ir
+        k_ir = self.ir_k_local(self.ir_k_for_rgb(ir_kv))
+        v_ir = self.ir_v_local(self.ir_v_for_rgb(ir_kv))
+        rgb_from_ir = self.rgb_out(self._cross_modal_update(q_rgb, k_ir, v_ir))
+        rgb_enh = rgb + self.gamma_rgb * rgb_from_ir
+
+        # 新增：再做 IR <- RGB 的跨模态增强。
+        q_ir = self.ir_q_local(self.ir_q(ir))
+        rgb_kv = F.avg_pool2d(rgb, kernel_size=self.kv_stride, stride=self.kv_stride, ceil_mode=True) if self.kv_stride > 1 else rgb
+        k_rgb = self.rgb_k_local(self.rgb_k_for_ir(rgb_kv))
+        v_rgb = self.rgb_v_local(self.rgb_v_for_ir(rgb_kv))
+        ir_from_rgb = self.ir_out(self._cross_modal_update(q_ir, k_rgb, v_rgb))
+        ir_enh = ir + self.gamma_ir * ir_from_rgb
+
+        base = 0.5 * (rgb + ir)
+        # 新增：将双向增强结果 concat 后 1x1 融合，并叠加基础残差，输出仍为 [B, C, H, W]。
+        return self.fuse(torch.cat([rgb_enh, ir_enh], dim=1)) + base
+
+
+# 新增别名：CMASSA；
+# 作用：提供更短的 YAML 名称，功能与 CrossModalASSAFusion 完全一致；
+# 用法：建议在模型 YAML 中优先使用 CMASSA。
+class CMASSA(CrossModalASSAFusion):
+    """Alias of CrossModalASSAFusion for concise YAML naming."""
+
+    def __init__(self, c, reduction=2, kv_stride=4, num_heads=1):
+        super().__init__(c=c, reduction=reduction, kv_stride=kv_stride, num_heads=num_heads)
 
 
 
