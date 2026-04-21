@@ -4,6 +4,8 @@ import contextlib
 from copy import deepcopy
 from pathlib import Path
 
+from ultralytics.nn.modules import ADD, Concat, CMASSA, CrossModalASSAFusion
+
 import torch
 import torch.nn as nn
 
@@ -1137,6 +1139,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = args[1] if args[3] else args[1] * 4
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
+        elif m in {ADD, CMASSA, CrossModalASSAFusion}:
+            c2 = ch[f[0]]
+            if m is ADD:
+                args = [c2]
+            else:
+                reduction = args[0] if len(args) > 0 else 2
+                kv_stride = args[1] if len(args) > 1 else 4
+                num_heads = args[2] if len(args) > 2 else 1
+                args = [c2, reduction, kv_stride, num_heads]
+
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn}:
