@@ -1771,7 +1771,10 @@ class SparseDualModalFusion(nn.Module):
         # 5) Final modality fusion.
         if self.fuse_mode == "add":
             return (rgb_enhanced + ir_enhanced).to(input_dtype)
-        return self.proj_out(torch.cat([rgb_enhanced, ir_enhanced], dim=1)).to(input_dtype)
+        fused = torch.cat([rgb_enhanced, ir_enhanced], dim=1)
+        # Keep conv input dtype aligned with conv weight dtype under AMP/mixed precision.
+        fused = fused.to(self.proj_out.weight.dtype)
+        return self.proj_out(fused).to(input_dtype)
 
 
 
