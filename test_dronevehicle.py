@@ -1,6 +1,10 @@
 from pathlib import Path
 import argparse
-
+#cd /home/ubuntu/MCONG/twostream_yolov8
+#python test_dronevehicle.py \
+#  --weights /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs/train3/weights/best.pt \
+#  --project /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs/train3 \
+# --name test_results
 
 def parse_args():
     repo_root = Path(__file__).resolve().parent
