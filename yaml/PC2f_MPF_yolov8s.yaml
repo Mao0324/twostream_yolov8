@@ -61,9 +61,9 @@ backbone:
   - [-1, 1, SPPF, [1024, 5]] # 22
 
   
-  - [[9,11], 1, ADD, [1]] # 23
-  - [[14,16], 1, ADD, [1]] # 24
-  - [[20,22],1, ADD, [1]] # 25
+  - [[9,11], 1, SparseDualModalFusion, [1, "inv_sqrt_dim", "concat"]] # 23
+  - [[14,16], 1, SparseDualModalFusion, [1, "inv_sqrt_dim", "concat"]] # 24
+  - [[20,22], 1, SparseDualModalFusion, [1, "inv_sqrt_dim", "concat"]] # 25
 
 # YOLOv8.0s head
 head:

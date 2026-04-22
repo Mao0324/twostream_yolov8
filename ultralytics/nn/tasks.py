@@ -50,6 +50,7 @@ from ultralytics.nn.modules import (
     Silence,
     WorldDetect,
     Concat2,
+    SparseDualModalFusion,
     ADD,
     ShuffleAttention,
     SimAM,
@@ -1061,6 +1062,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 #            print("ch[f]", f, ch[f[0]])
             c2 = ch[f[0]]
             args = [c2]  
+        elif m is SparseDualModalFusion:
+            c2 = ch[f[0]]
+            # Keep optional YAML args (e.g. gamma_init/fuse_mode) while forcing dim from graph channels.
+            args = [c2, *args[1:]] if len(args) > 1 else [c2]
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]

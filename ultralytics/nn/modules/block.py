@@ -4,6 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
@@ -39,6 +40,8 @@ __all__ = (
     "Silence",
     "Concat2",
     "ADD",
+    "LocalFeatureExtractor",
+    "SparseDualModalFusion",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1613,6 +1616,149 @@ class ADD(nn.Module):
         return torch.add(x[0], x[1])
 
 
+class _LayerNorm2d(nn.Module):
+    """LayerNorm for NCHW tensors (normalizes across channel dimension)."""
+
+    def __init__(self, num_channels, eps=1e-6):
+        super().__init__()
+        self.norm = nn.LayerNorm(num_channels, eps=eps)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = self.norm(x)
+        return x.permute(0, 3, 1, 2).contiguous()
+
+
+class LocalFeatureExtractor(nn.Module):
+    """
+    Local spatial-variant feature extractor:
+    1x1 Conv -> LayerNorm -> 3x3 Depth-wise Conv.
+    """
+
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.pw = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
+        self.norm = _LayerNorm2d(dim, eps=eps)
+        self.dw = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=False)
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        x = self.pw(x)
+        x = self.norm(x)
+        x = self.act(x)
+        x = self.dw(x)
+        return x
+
+
+class SparseDualModalFusion(nn.Module):
+    """
+    Sparse dual-modal cross-attention fusion for RGB/IR features.
+
+    Args:
+        dim (int): channel dimension for each modality.
+        gamma_init (str | float): learnable scale init, supports:
+            - "inv_sqrt_dim": 1 / sqrt(dim)
+            - "one": 1.0
+            - float value
+        fuse_mode (str): "concat" or "add" for final fusion.
+    """
+
+    def __init__(self, dim, gamma_init="inv_sqrt_dim", fuse_mode="concat"):
+        super().__init__()
+        if fuse_mode not in {"concat", "add"}:
+            raise ValueError(f"Unsupported fuse_mode={fuse_mode}, expected 'concat' or 'add'.")
+
+        self.dim = dim
+        self.fuse_mode = fuse_mode
+
+        if isinstance(gamma_init, str):
+            if gamma_init == "inv_sqrt_dim":
+                gamma_value = 1.0 / math.sqrt(dim)
+            elif gamma_init == "one":
+                gamma_value = 1.0
+            else:
+                raise ValueError(f"Unsupported gamma_init={gamma_init}.")
+        else:
+            gamma_value = float(gamma_init)
+        self.gamma = nn.Parameter(torch.tensor([gamma_value], dtype=torch.float32))
+
+        # Independent query extractors for RGB and IR.
+        self.q_rgb = LocalFeatureExtractor(dim)
+        self.q_ir = LocalFeatureExtractor(dim)
+
+        # KV-sharing in each modality: one shared extractor for both K and V.
+        self.kv_rgb = LocalFeatureExtractor(dim)
+        self.kv_ir = LocalFeatureExtractor(dim)
+
+        # Final fusion projection.
+        self.proj_out = nn.Conv2d(dim * 2, dim, kernel_size=1, bias=False) if fuse_mode == "concat" else nn.Identity()
+
+    @staticmethod
+    def _flatten_to_tokens(x):
+        # NCHW -> BNC
+        b, c, h, w = x.shape
+        return x.flatten(2).transpose(1, 2).contiguous(), (b, c, h, w)
+
+    @staticmethod
+    def _restore_from_tokens(x, hw_shape):
+        # BNC -> NCHW
+        b, c, h, w = hw_shape
+        return x.transpose(1, 2).contiguous().view(b, c, h, w)
+
+    def forward(self, x_rgb, x_ir=None):
+        """
+        Supports two calling styles:
+        - forward(x_rgb, x_ir)
+        - forward([x_rgb, x_ir]) / forward((x_rgb, x_ir))
+        """
+        if x_ir is None:
+            if isinstance(x_rgb, (list, tuple)) and len(x_rgb) == 2:
+                x_rgb, x_ir = x_rgb
+            else:
+                raise ValueError("SparseDualModalFusion expects (x_rgb, x_ir) or [x_rgb, x_ir].")
+
+        if x_rgb.shape != x_ir.shape:
+            raise ValueError(f"RGB/IR feature shape mismatch: {tuple(x_rgb.shape)} vs {tuple(x_ir.shape)}")
+        if x_rgb.dim() != 4:
+            raise ValueError(f"Expected 4D tensors (B,C,H,W), got {x_rgb.dim()}D")
+        if x_rgb.shape[1] != self.dim:
+            raise ValueError(f"Channel mismatch: expected C={self.dim}, got C={x_rgb.shape[1]}")
+
+        # 1) Local feature extraction for Q/K/V.
+        q_rgb_feat = self.q_rgb(x_rgb)
+        q_ir_feat = self.q_ir(x_ir)
+        kv_rgb_feat = self.kv_rgb(x_rgb)
+        kv_ir_feat = self.kv_ir(x_ir)
+
+        # 2) Flatten spatial dims: (B, C, H, W) -> tokens with N=H*W.
+        q_rgb, rgb_shape = self._flatten_to_tokens(q_rgb_feat)  # B, N, C
+        q_ir, _ = self._flatten_to_tokens(q_ir_feat)            # B, N, C
+
+        kv_rgb_tokens, _ = self._flatten_to_tokens(kv_rgb_feat)  # B, N, C
+        kv_ir_tokens, _ = self._flatten_to_tokens(kv_ir_feat)    # B, N, C
+
+        k_rgb = kv_rgb_tokens.transpose(1, 2).contiguous()  # B, C, N
+        k_ir = kv_ir_tokens.transpose(1, 2).contiguous()    # B, C, N
+        v_rgb = kv_rgb_tokens                               # B, N, C
+        v_ir = kv_ir_tokens                                 # B, N, C
+
+        # 3) Sparse cross-attention (ReLU only, no Softmax).
+        attn_rgb_to_ir = F.relu(self.gamma * torch.matmul(q_rgb, k_ir))   # B, N, N
+        attn_ir_to_rgb = F.relu(self.gamma * torch.matmul(q_ir, k_rgb))   # B, N, N
+
+        # 4) Feature aggregation + residual.
+        rgb_enhanced_tokens = torch.matmul(attn_rgb_to_ir, v_ir)          # B, N, C
+        ir_enhanced_tokens = torch.matmul(attn_ir_to_rgb, v_rgb)          # B, N, C
+
+        rgb_enhanced = self._restore_from_tokens(rgb_enhanced_tokens, rgb_shape) + x_rgb
+        ir_enhanced = self._restore_from_tokens(ir_enhanced_tokens, rgb_shape) + x_ir
+
+        # 5) Final modality fusion.
+        if self.fuse_mode == "add":
+            return rgb_enhanced + ir_enhanced
+        return self.proj_out(torch.cat([rgb_enhanced, ir_enhanced], dim=1))
+
+
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
@@ -2957,6 +3103,4 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
-
 
