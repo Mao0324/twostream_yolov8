@@ -1663,13 +1663,14 @@ class SparseDualModalFusion(nn.Module):
         fuse_mode (str): "concat" or "add" for final fusion.
     """
 
-    def __init__(self, dim, gamma_init="inv_sqrt_dim", fuse_mode="concat"):
+    def __init__(self, dim, gamma_init="inv_sqrt_dim", fuse_mode="concat", attn_eps=1e-6):
         super().__init__()
         if fuse_mode not in {"concat", "add"}:
             raise ValueError(f"Unsupported fuse_mode={fuse_mode}, expected 'concat' or 'add'.")
 
         self.dim = dim
         self.fuse_mode = fuse_mode
+        self.attn_eps = attn_eps
 
         if isinstance(gamma_init, str):
             if gamma_init == "inv_sqrt_dim":
@@ -1724,6 +1725,8 @@ class SparseDualModalFusion(nn.Module):
         if x_rgb.shape[1] != self.dim:
             raise ValueError(f"Channel mismatch: expected C={self.dim}, got C={x_rgb.shape[1]}")
 
+        input_dtype = x_rgb.dtype
+
         # 1) Local feature extraction for Q/K/V.
         q_rgb_feat = self.q_rgb(x_rgb)
         q_ir_feat = self.q_ir(x_ir)
@@ -1742,21 +1745,33 @@ class SparseDualModalFusion(nn.Module):
         v_rgb = kv_rgb_tokens                               # B, N, C
         v_ir = kv_ir_tokens                                 # B, N, C
 
-        # 3) Sparse cross-attention (ReLU only, no Softmax).
-        attn_rgb_to_ir = F.relu(self.gamma * torch.matmul(q_rgb, k_ir))   # B, N, N
-        attn_ir_to_rgb = F.relu(self.gamma * torch.matmul(q_ir, k_rgb))   # B, N, N
+        # 3) Sparse cross-attention (ReLU only, no Softmax), computed in fp32 for stability.
+        q_rgb = q_rgb.float()
+        q_ir = q_ir.float()
+        k_rgb = k_rgb.float()
+        k_ir = k_ir.float()
+        v_rgb = v_rgb.float()
+        v_ir = v_ir.float()
+        gamma = torch.clamp(self.gamma.float(), min=self.attn_eps)
+
+        attn_rgb_to_ir = F.relu(gamma * torch.matmul(q_rgb, k_ir))   # B, N, N
+        attn_ir_to_rgb = F.relu(gamma * torch.matmul(q_ir, k_rgb))   # B, N, N
+
+        # ReLU-sparse row normalization (still non-softmax) to prevent exploding sums over N.
+        attn_rgb_to_ir = attn_rgb_to_ir / attn_rgb_to_ir.sum(dim=-1, keepdim=True).clamp_min(self.attn_eps)
+        attn_ir_to_rgb = attn_ir_to_rgb / attn_ir_to_rgb.sum(dim=-1, keepdim=True).clamp_min(self.attn_eps)
 
         # 4) Feature aggregation + residual.
         rgb_enhanced_tokens = torch.matmul(attn_rgb_to_ir, v_ir)          # B, N, C
         ir_enhanced_tokens = torch.matmul(attn_ir_to_rgb, v_rgb)          # B, N, C
 
-        rgb_enhanced = self._restore_from_tokens(rgb_enhanced_tokens, rgb_shape) + x_rgb
-        ir_enhanced = self._restore_from_tokens(ir_enhanced_tokens, rgb_shape) + x_ir
+        rgb_enhanced = self._restore_from_tokens(rgb_enhanced_tokens, rgb_shape) + x_rgb.float()
+        ir_enhanced = self._restore_from_tokens(ir_enhanced_tokens, rgb_shape) + x_ir.float()
 
         # 5) Final modality fusion.
         if self.fuse_mode == "add":
-            return rgb_enhanced + ir_enhanced
-        return self.proj_out(torch.cat([rgb_enhanced, ir_enhanced], dim=1))
+            return (rgb_enhanced + ir_enhanced).to(input_dtype)
+        return self.proj_out(torch.cat([rgb_enhanced, ir_enhanced], dim=1)).to(input_dtype)
 
 
 
@@ -3103,4 +3118,3 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
