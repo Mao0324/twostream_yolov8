@@ -78,7 +78,8 @@ from ultralytics.nn.modules import (
     C2f_Faster,
     Fusion,
     Concat3,
-    RIFusion
+    RIFusion,
+    ASSABiCrossFusion,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1061,6 +1062,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 #            print("ch[f]", f, ch[f[0]])
             c2 = ch[f[0]]
             args = [c2]  
+        elif m is ASSABiCrossFusion:
+            if not isinstance(f, (list, tuple)) or len(f) != 2:
+                raise ValueError(f"ASSABiCrossFusion expects 2 input indexes, but got from={f}.")
+            c1_rgb, c1_ir = ch[f[0]], ch[f[1]]
+            if len(args) and args[0] is not None:
+                c2 = args[0]
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            else:
+                c2 = max(c1_rgb, c1_ir)
+            args = [c1_rgb, c1_ir, c2, *args[1:]]
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]

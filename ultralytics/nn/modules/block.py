@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
-from .transformer import TransformerBlock
+from .transformer import LayerNorm2d, TransformerBlock
 
 __all__ = (
     "DFL",
@@ -54,7 +54,10 @@ __all__ = (
     "GCBAM",
     "SACBAM",
     "MdC2f",
-    "C2f_Invo"
+    "C2f_Invo",
+    "LocalSpatialVariantProjector",
+    "SparseChannelCrossAttention",
+    "ASSABiCrossFusion",
 )
 class BasicConv(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1, groups=1, relu=True,
@@ -1613,6 +1616,197 @@ class ADD(nn.Module):
         return torch.add(x[0], x[1])
 
 
+class LocalSpatialVariantProjector(nn.Module):
+    """ASSA-style local spatial-variant projector for Q/KV generation."""
+
+    def __init__(self, c1, c2=None, k=3, mode="dynamic"):
+        super().__init__()
+        c2 = c1 if c2 is None else c2
+        self.mode = mode.lower()
+        self.kernel_size = k
+
+        self.norm = LayerNorm2d(c1, eps=1e-6)
+        self.proj = nn.Conv2d(c1, c2, kernel_size=1, stride=1, padding=0, bias=True)
+        self.dwconv = nn.Conv2d(c2, c2, kernel_size=k, stride=1, padding=autopad(k), groups=c2, bias=True)
+
+        if self.mode == "dynamic":
+            self.kernel_gen = nn.Conv2d(c2, c2 * k * k, kernel_size=1, stride=1, padding=0, bias=True)
+        elif self.mode == "gate":
+            self.gate_gen = nn.Conv2d(c2, c2, kernel_size=1, stride=1, padding=0, bias=True)
+        else:
+            raise ValueError(f"Unsupported projector mode '{mode}', expected 'dynamic' or 'gate'.")
+
+    def _dynamic_depthwise_conv(self, x, feat):
+        """Pixel-wise dynamic depthwise convolution implemented with unfold."""
+        b, c, h, w = x.shape
+        k2 = self.kernel_size * self.kernel_size
+        weights = self.kernel_gen(feat).view(b, c, k2, h * w)
+        patches = F.unfold(x, kernel_size=self.kernel_size, padding=autopad(self.kernel_size)).view(b, c, k2, h * w)
+
+        compute_dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+        out = (weights.to(compute_dtype) * patches.to(compute_dtype)).sum(dim=2)
+        return out.to(x.dtype).view(b, c, h, w)
+
+    def forward(self, x):
+        x0 = self.proj(self.norm(x))
+        feat = self.dwconv(x0)
+        if self.mode == "dynamic":
+            return self._dynamic_depthwise_conv(x0, feat)
+        gate = torch.sigmoid(self.gate_gen(feat))
+        return x0 * gate
+
+
+class SparseChannelCrossAttention(nn.Module):
+    """Detection-friendly sparse channel-wise (transposed) cross attention."""
+
+    def __init__(self, c, num_heads=4, selector="relu"):
+        super().__init__()
+        self.channels = c
+        self.num_heads = self._resolve_heads(c, num_heads)
+        self.head_dim = c // self.num_heads
+        self.selector = selector.lower()
+
+        self.temperature = nn.Parameter(torch.ones(self.num_heads, 1, 1))
+        self.out_proj = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0, bias=True)
+
+    @staticmethod
+    def _resolve_heads(channels, num_heads):
+        num_heads = max(1, int(num_heads))
+        for h in range(min(num_heads, channels), 0, -1):
+            if channels % h == 0:
+                return h
+        raise ValueError(f"Unable to find a valid number of heads for channels={channels}.")
+
+    def _select(self, attn):
+        if self.selector == "relu":
+            return F.relu(attn)
+        if self.selector == "softmax":
+            return attn.softmax(dim=-1)
+        if self.selector == "gelu":
+            return F.gelu(attn)
+        if self.selector == "sigmoid":
+            return torch.sigmoid(attn)
+        raise ValueError(f"Unsupported selector '{self.selector}'.")
+
+    def forward(self, q, kv):
+        if isinstance(kv, (list, tuple)):
+            if len(kv) != 2:
+                raise ValueError("When kv is a tuple/list, it must be in (k, v) format.")
+            k, v = kv
+        else:
+            k = v = kv
+
+        if q.shape != k.shape or k.shape != v.shape:
+            raise ValueError(f"Shape mismatch in cross attention: q={q.shape}, k={k.shape}, v={v.shape}.")
+
+        b, c, h, w = q.shape
+        n = h * w
+        q = q.view(b, self.num_heads, self.head_dim, n)
+        k = k.view(b, self.num_heads, self.head_dim, n)
+        v = v.view(b, self.num_heads, self.head_dim, n)
+
+        q = F.normalize(q, dim=-1, eps=1e-6)
+        k = F.normalize(k, dim=-1, eps=1e-6)
+
+        compute_dtype = torch.float32 if q.dtype in (torch.float16, torch.bfloat16) else q.dtype
+        qf = q.to(compute_dtype)
+        kf = k.to(compute_dtype)
+        vf = v.to(compute_dtype)
+
+        attn = torch.matmul(qf, kf.transpose(-2, -1))
+        attn = self._select(attn * self.temperature.view(1, self.num_heads, 1, 1).to(compute_dtype))
+        out = torch.matmul(attn, vf).to(q.dtype).view(b, c, h, w)
+        return self.out_proj(out)
+
+
+class ASSABiCrossFusion(nn.Module):
+    """ASSA-style bidirectional sparse cross-modal fusion for one scale."""
+
+    def __init__(
+        self,
+        c1_rgb,
+        c1_ir,
+        c2=None,
+        num_heads=4,
+        proj_kernel=3,
+        proj_mode="dynamic",
+        selector="relu",
+        kv_share=True,
+        bidirectional=True,
+        residual=True,
+    ):
+        super().__init__()
+        c2 = max(c1_rgb, c1_ir) if c2 is None else c2
+        self.c2 = c2
+        self.kv_share = kv_share
+        self.bidirectional = bidirectional
+        self.residual = residual
+
+        self.align_rgb = nn.Identity() if c1_rgb == c2 else nn.Conv2d(c1_rgb, c2, kernel_size=1, stride=1, padding=0)
+        self.align_ir = nn.Identity() if c1_ir == c2 else nn.Conv2d(c1_ir, c2, kernel_size=1, stride=1, padding=0)
+
+        self.rgb_q_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+        self.ir_q_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+
+        if kv_share:
+            self.rgb_kv_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+            self.ir_kv_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+        else:
+            self.rgb_k_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+            self.rgb_v_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+            self.ir_k_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+            self.ir_v_proj = LocalSpatialVariantProjector(c2, c2, k=proj_kernel, mode=proj_mode)
+
+        self.rgb_from_ir = SparseChannelCrossAttention(c2, num_heads=num_heads, selector=selector)
+        self.ir_from_rgb = SparseChannelCrossAttention(c2, num_heads=num_heads, selector=selector)
+
+        self.gate = nn.Conv2d(c2 * 4, c2, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fuse = nn.Sequential(
+            nn.Conv2d(c2 * 3, c2, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c2, c2, kernel_size=3, stride=1, padding=1, bias=True),
+        )
+
+    def _kv_rgb(self, r):
+        if self.kv_share:
+            return self.rgb_kv_proj(r)
+        return self.rgb_k_proj(r), self.rgb_v_proj(r)
+
+    def _kv_ir(self, i):
+        if self.kv_share:
+            return self.ir_kv_proj(i)
+        return self.ir_k_proj(i), self.ir_v_proj(i)
+
+    def forward(self, x):
+        if not isinstance(x, (list, tuple)) or len(x) != 2:
+            raise ValueError("ASSABiCrossFusion expects a 2-item list/tuple input: [rgb, ir].")
+
+        rgb, ir = x
+        if rgb.shape[-2:] != ir.shape[-2:]:
+            raise ValueError(f"RGB/IR spatial mismatch: rgb={rgb.shape}, ir={ir.shape}.")
+
+        r = self.align_rgb(rgb)
+        i = self.align_ir(ir)
+
+        q_r = self.rgb_q_proj(r)
+        q_i = self.ir_q_proj(i)
+        kv_r = self._kv_rgb(r)
+        kv_i = self._kv_ir(i)
+
+        r_from_i = self.rgb_from_ir(q_r, kv_i)
+        i_from_r = self.ir_from_rgb(q_i, kv_r) if self.bidirectional else torch.zeros_like(i)
+
+        gate = torch.sigmoid(self.gate(torch.cat((r, i, r_from_i, i_from_r), dim=1)))
+        r_enh = r + gate * r_from_i
+        i_enh = i + (1.0 - gate) * i_from_r if self.bidirectional else i
+
+        base = r + i
+        out = self.fuse(torch.cat((r_enh, i_enh, base), dim=1))
+        if self.residual:
+            out = out + base
+        return out
+
+
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
@@ -2073,7 +2267,24 @@ class C2f_PPA(C2f):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(PPA(self.c, self.c) for _ in range(n))
 
-from timm.models.layers import DropPath
+try:
+    from timm.models.layers import DropPath
+except ImportError:
+    class DropPath(nn.Module):
+        """Fallback DropPath when timm is unavailable."""
+
+        def __init__(self, drop_prob=0.0):
+            super().__init__()
+            self.drop_prob = drop_prob
+
+        def forward(self, x):
+            if self.drop_prob == 0.0 or not self.training:
+                return x
+            keep_prob = 1 - self.drop_prob
+            shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+            random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+            random_tensor.floor_()
+            return x.div(keep_prob) * random_tensor
 
 
 class Partial_conv3(nn.Module):
@@ -2957,6 +3168,4 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
-
 

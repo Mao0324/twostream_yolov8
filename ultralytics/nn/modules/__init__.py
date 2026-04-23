@@ -75,7 +75,10 @@ from .block import (
     C2f_RG,
     Fusion,
     Concat3,
-    RIFusion
+    RIFusion,
+    LocalSpatialVariantProjector,
+    SparseChannelCrossAttention,
+    ASSABiCrossFusion,
 )
 from .conv import (
     CBAM,
@@ -165,4 +168,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
+    "LocalSpatialVariantProjector",
+    "SparseChannelCrossAttention",
+    "ASSABiCrossFusion",
 )
