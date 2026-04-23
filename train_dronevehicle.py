@@ -12,9 +12,9 @@ model.load('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-traine
 results = model.train(
     data='/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/dronevehicle.yaml',
     batch=64,
-    epochs=200,
+    epochs=100,
     imgsz=640,
-    device='1,2,3,4',
-    project='/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs',
+    device='0,1,2,3,4,5,6,7',
+    project='/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs_baseline',
     task='obb'
 )
