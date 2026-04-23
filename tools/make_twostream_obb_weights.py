@@ -7,7 +7,7 @@ Default paths match the user's requested locations:
 
 Usage:
   python make_twostream_obb_weights.py \
-      --target-yaml /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s.yaml
+      --target-yaml /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s_assa.yaml
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from ultralytics import YOLO
 
 
 DEFAULT_SOURCE = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
-DEFAULT_TARGET_YAML = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s.yaml")
+DEFAULT_TARGET_YAML = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s_assa.yaml")
 DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt")
 
 # single-stream yolov8s(-obb) layer index -> two-stream RGB branch layer index
