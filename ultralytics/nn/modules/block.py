@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
-from .transformer import TransformerBlock
+from .transformer import LayerNorm2d, TransformerBlock
 
 __all__ = (
     "DFL",
@@ -39,6 +39,7 @@ __all__ = (
     "Silence",
     "Concat2",
     "ADD",
+    "ASSAFusion",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1613,6 +1614,76 @@ class ADD(nn.Module):
         return torch.add(x[0], x[1])
 
 
+class ASSAFusion(nn.Module):
+    """Lightweight adaptive sparse self-attention cross-modal fusion for RGB/IR feature maps."""
+
+    def __init__(self, c1, reduction=16, min_ch=8, max_ch=32):
+        """Initialize ASSAFusion with input channels and channel-reduction hyperparameters."""
+        super().__init__()
+        c_mid = min(max(c1 // reduction, min_ch), max_ch)
+        self.c1 = c1
+        self.c_mid = c_mid
+
+        # Shared projections for both modalities to keep parameter count low.
+        self.q_proj = nn.Sequential(
+            LayerNorm2d(c1),
+            nn.Conv2d(c1, c_mid, 1, bias=False),
+            nn.Conv2d(c_mid, c_mid, 3, 1, 1, groups=c_mid, bias=False),
+        )
+        self.kv_proj = nn.Sequential(
+            LayerNorm2d(c1),
+            nn.Conv2d(c1, c_mid, 1, bias=False),
+            nn.Conv2d(c_mid, c_mid, 3, 1, 1, groups=c_mid, bias=False),
+        )
+
+        self.out_proj = nn.Conv2d(c_mid, c1, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(1))
+        self.beta = nn.Parameter(torch.zeros(1))
+
+    def _sparse_attn(self, q_feat, kv_feat):
+        """Compute sparse cross-modal attention in channel space: [B, c_mid, c_mid]."""
+        b, c, h, w = q_feat.shape
+        q = q_feat.flatten(2)
+        k = kv_feat.flatten(2)
+        v = kv_feat.flatten(2)
+
+        q = F.normalize(q, dim=-1, eps=1e-6)
+        k = F.normalize(k, dim=-1, eps=1e-6)
+
+        attn = torch.bmm(q, k.transpose(1, 2))
+        attn = F.relu(self.temperature * attn)
+        y = torch.bmm(attn, v)
+        return y.view(b, c, h, w)
+
+    def forward(self, x):
+        """Fuse RGB and IR features with ADD main path plus sparse attention residual."""
+        assert isinstance(x, (list, tuple)), f"ASSAFusion expects list/tuple input, got {type(x)}"
+        assert len(x) == 2, f"ASSAFusion expects exactly 2 inputs [x_rgb, x_ir], got {len(x)}"
+        x_rgb, x_ir = x
+        assert x_rgb.ndim == 4 and x_ir.ndim == 4, (
+            f"ASSAFusion expects 4D tensors [B, C, H, W], got {x_rgb.ndim}D and {x_ir.ndim}D"
+        )
+        assert x_rgb.shape == x_ir.shape, (
+            f"ASSAFusion expects same shape for RGB/IR, got {tuple(x_rgb.shape)} and {tuple(x_ir.shape)}"
+        )
+        assert x_rgb.shape[1] == self.c1, (
+            f"ASSAFusion expected channel={self.c1}, but got channel={x_rgb.shape[1]}"
+        )
+
+        base = x_rgb + x_ir
+
+        q_rgb = self.q_proj(x_rgb)
+        q_ir = self.q_proj(x_ir)
+        kv_rgb = self.kv_proj(x_rgb)
+        kv_ir = self.kv_proj(x_ir)
+
+        y_rgb_from_ir = self._sparse_attn(q_rgb, kv_ir)
+        y_ir_from_rgb = self._sparse_attn(q_ir, kv_rgb)
+        delta = self.out_proj(y_rgb_from_ir + y_ir_from_rgb)
+
+        return base + self.beta * delta
+
+
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
@@ -2957,6 +3028,5 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
 
 

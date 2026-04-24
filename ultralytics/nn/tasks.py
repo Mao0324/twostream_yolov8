@@ -51,6 +51,7 @@ from ultralytics.nn.modules import (
     WorldDetect,
     Concat2,
     ADD,
+    ASSAFusion,
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -1061,6 +1062,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 #            print("ch[f]", f, ch[f[0]])
             c2 = ch[f[0]]
             args = [c2]  
+        elif m is ASSAFusion:
+            assert isinstance(f, (list, tuple)) and len(f) == 2, (
+                f"ASSAFusion expects exactly 2 input indices, but got from={f}"
+            )
+            c1 = ch[f[0]]
+            assert ch[f[1]] == c1, (
+                f"ASSAFusion expects equal input channels, but got {ch[f[0]]} and {ch[f[1]]} at layer {i}"
+            )
+            args = [c1, *args]
+            c2 = c1
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]
