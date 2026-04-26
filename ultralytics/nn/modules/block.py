@@ -1,12 +1,13 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
-from .transformer import TransformerBlock
+from .transformer import LayerNorm2d, TransformerBlock
 
 __all__ = (
     "DFL",
@@ -39,6 +40,7 @@ __all__ = (
     "Silence",
     "Concat2",
     "ADD",
+    "RGBDominantASSAFusion",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1613,6 +1615,83 @@ class ADD(nn.Module):
         return torch.add(x[0], x[1])
 
 
+class RGBDominantASSAFusion(nn.Module):
+    """Lightweight RGB-dominant sparse IR-to-RGB cross-modal fusion."""
+
+    def __init__(self, c1, reduction=16, min_ch=8, max_ch=32, alpha_init=0.2):
+        super().__init__()
+
+        assert c1 > 0, f"c1 must be positive, got {c1}"
+        assert reduction > 0, f"reduction must be positive, got {reduction}"
+        assert min_ch > 0 and max_ch >= min_ch, (
+            f"invalid min_ch/max_ch: min_ch={min_ch}, max_ch={max_ch}"
+        )
+
+        alpha_init = float(alpha_init)
+        alpha_init = min(max(alpha_init, 1e-4), 1.0 - 1e-4)
+        c_mid = min(max(c1 // reduction, min_ch), max_ch)
+
+        self.c1 = c1
+        self.c_mid = c_mid
+
+        self.q_norm = LayerNorm2d(c1)
+        self.kv_norm = LayerNorm2d(c1)
+
+        self.q_pw = nn.Conv2d(c1, c_mid, kernel_size=1, bias=False)
+        self.q_dw = nn.Conv2d(c_mid, c_mid, kernel_size=3, padding=1, groups=c_mid, bias=False)
+        self.kv_pw = nn.Conv2d(c1, c_mid, kernel_size=1, bias=False)
+        self.kv_dw = nn.Conv2d(c_mid, c_mid, kernel_size=3, padding=1, groups=c_mid, bias=False)
+        self.out_proj = nn.Conv2d(c_mid, c1, kernel_size=1, bias=False)
+
+        self.temperature = nn.Parameter(torch.ones(1))
+        self.beta = nn.Parameter(torch.zeros(1))
+
+        alpha_logit = math.log(alpha_init / (1.0 - alpha_init))
+        self.alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
+
+    def _q(self, x):
+        return self.q_dw(self.q_pw(self.q_norm(x)))
+
+    def _kv(self, x):
+        return self.kv_dw(self.kv_pw(self.kv_norm(x)))
+
+    def _sparse_ir_to_rgb_attn(self, q_rgb, kv_ir):
+        b, c, h, w = q_rgb.shape
+        q = q_rgb.flatten(2)
+        k = kv_ir.flatten(2)
+        v = kv_ir.flatten(2)
+
+        q = F.normalize(q, dim=-1, eps=1e-6)
+        k = F.normalize(k, dim=-1, eps=1e-6)
+
+        attn = torch.bmm(q, k.transpose(1, 2))
+        attn = F.relu(self.temperature * attn)
+
+        y = torch.bmm(attn, v)
+        return y.view(b, c, h, w)
+
+    def forward(self, x):
+        assert isinstance(x, (list, tuple)) and len(x) == 2, "RGBDominantASSAFusion expects [x_rgb, x_ir]"
+
+        x_rgb, x_ir = x
+        assert torch.is_tensor(x_rgb) and torch.is_tensor(x_ir), (
+            "RGBDominantASSAFusion expects x_rgb and x_ir to be tensors"
+        )
+        assert x_rgb.shape == x_ir.shape, (
+            f"RGBDominantASSAFusion expects same shape, got {x_rgb.shape} and {x_ir.shape}"
+        )
+        assert x_rgb.ndim == 4, f"RGBDominantASSAFusion expects 4D NCHW tensors, got shape {x_rgb.shape}"
+
+        q_rgb = self._q(x_rgb)
+        kv_ir = self._kv(x_ir)
+
+        delta = self._sparse_ir_to_rgb_attn(q_rgb, kv_ir)
+        delta = self.out_proj(delta)
+        alpha = torch.sigmoid(self.alpha_logit)
+
+        return x_rgb + alpha * x_ir + self.beta * delta
+
+
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
@@ -2957,6 +3036,4 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
-
 

@@ -51,6 +51,7 @@ from ultralytics.nn.modules import (
     WorldDetect,
     Concat2,
     ADD,
+    RGBDominantASSAFusion,
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -1061,6 +1062,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 #            print("ch[f]", f, ch[f[0]])
             c2 = ch[f[0]]
             args = [c2]  
+        elif m is RGBDominantASSAFusion:
+            assert isinstance(f, list) and len(f) == 2, (
+                "RGBDominantASSAFusion requires two input feature maps: [rgb_idx, ir_idx]"
+            )
+            c1 = ch[f[0]]
+            c_ir = ch[f[1]]
+            assert c1 == c_ir, (
+                f"RGBDominantASSAFusion expects equal channels, got RGB={c1}, IR={c_ir}"
+            )
+            args = [c1, *args]
+            c2 = c1
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]
