@@ -49,6 +49,9 @@ from .block import (
     Concat2,
     S2Attention,
     ADD,
+    ASSAAdd,
+    ASSARIFusion,
+    ASSARefine,
     SimAM,
     ShuffleAttention,
     GAM_Attention,
@@ -165,4 +168,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
+    "ASSAAdd",
+    "ASSARIFusion",
+    "ASSARefine",
 )

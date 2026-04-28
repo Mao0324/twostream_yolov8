@@ -51,6 +51,9 @@ from ultralytics.nn.modules import (
     WorldDetect,
     Concat2,
     ADD,
+    ASSAAdd,
+    ASSARIFusion,
+    ASSARefine,
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -1061,12 +1064,22 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 #            print("ch[f]", f, ch[f[0]])
             c2 = ch[f[0]]
             args = [c2]  
+        elif m is ASSAAdd:
+            c2 = ch[f[0]]
+            assert ch[f[0]] == ch[f[1]], f"ASSAAdd input channels must match, got {ch[f[0]]} and {ch[f[1]]}"
+            args = [c2, *args]
+        elif m is ASSARefine:
+            c2 = ch[f]
+            args = [c2, *args]
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]
             args = [c1,c2] 
         elif m is RIFusion:
             args = [args[0]] 
+        elif m is ASSARIFusion:
+            c2 = ch[-1]
+            args = [c2, *args[1:]]
         elif m in {SKAttention,GLF,NAM,GLCBAM,GCBAM,SACBAM,CSFM}:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]
@@ -1177,7 +1190,9 @@ def yaml_model_load(path):
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
     d = yaml_load(yaml_file)  # model dict
-    d["scale"] = guess_model_scale(path)
+    scale = guess_model_scale(path)
+    if scale:
+        d["scale"] = scale
     d["yaml_file"] = str(path)
     return d
 
