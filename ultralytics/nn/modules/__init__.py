@@ -49,6 +49,8 @@ from .block import (
     Concat2,
     S2Attention,
     ADD,
+    SparseRIFusion,
+    RILateSparseGatedFuse,
     SimAM,
     ShuffleAttention,
     GAM_Attention,

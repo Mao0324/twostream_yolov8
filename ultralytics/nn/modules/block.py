@@ -1,6 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,6 +40,8 @@ __all__ = (
     "Silence",
     "Concat2",
     "ADD",
+    "SparseRIFusion",
+    "RILateSparseGatedFuse",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1613,6 +1616,279 @@ class ADD(nn.Module):
         return torch.add(x[0], x[1])
 
 
+def _make_divisible_groups(c, groups):
+    g = min(groups, c)
+    while g > 1 and c % g != 0:
+        g //= 2
+    return max(g, 1)
+
+
+def _logit(p):
+    p = min(max(float(p), 1e-4), 1.0 - 1e-4)
+    return math.log(p / (1.0 - p))
+
+
+def _scaled_gate_bias(value, scale):
+    value = float(value)
+    scale = float(scale)
+    eps = 1e-4
+    value = min(max(value, eps), scale - eps)
+    p = value / scale
+    return math.log(p / (1.0 - p))
+
+
+def high_frequency_map(x):
+    return (x - F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)).abs().mean(dim=1, keepdim=True)
+
+
+class SparseLayerNorm2d(nn.Module):
+    """Channel-wise LayerNorm for NCHW feature maps."""
+
+    def __init__(self, c, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(1, c, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(1, c, 1, 1))
+
+    def forward(self, x):
+        mean = x.mean(dim=1, keepdim=True)
+        var = (x - mean).pow(2).mean(dim=1, keepdim=True)
+        x = (x - mean) / torch.sqrt(var + self.eps)
+        return x * self.weight + self.bias
+
+
+class DWGroupBlock(nn.Module):
+    """Depthwise spatial mixing followed by grouped pointwise channel alignment."""
+
+    def __init__(self, c, groups=16):
+        super().__init__()
+        g = _make_divisible_groups(c, groups)
+        self.block = nn.Sequential(
+            nn.Conv2d(c, c, 3, padding=1, groups=c, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c, c, 1, groups=g, bias=False),
+            nn.BatchNorm2d(c),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class LocalQKVProj(nn.Module):
+    """Light local projection used before channel-wise sparse attention."""
+
+    def __init__(self, c1, c_mid):
+        super().__init__()
+        self.norm = SparseLayerNorm2d(c1)
+        self.pw = nn.Conv2d(c1, c_mid, 1, bias=False)
+        self.dw = nn.Conv2d(c_mid, c_mid, 3, padding=1, groups=c_mid, bias=False)
+
+    def forward(self, x):
+        return self.dw(self.pw(self.norm(x)))
+
+
+class SparseRIFusion(nn.Module):
+    """Stream-preserving sparse IR-to-RGB fusion for the custom f == -3 path."""
+
+    def __init__(
+        self,
+        c1,
+        reduction=16,
+        min_ch=16,
+        max_ch=32,
+        local_init=0.05,
+        attn_init=0.01,
+        gate_init=0.5,
+        groups=16,
+        norm_attn=True,
+        use_ir_update=False,
+    ):
+        super().__init__()
+        assert c1 > 0
+        assert reduction > 0
+        assert min_ch > 0 and max_ch >= min_ch
+
+        c_mid = min(max(c1 // reduction, min_ch), max_ch)
+
+        self.c1 = c1
+        self.c_mid = c_mid
+        self.norm_attn = bool(norm_attn)
+        self.use_ir_update = bool(use_ir_update)
+
+        self.ir_adapter = DWGroupBlock(c1, groups=groups)
+
+        self.spatial_gate = nn.Conv2d(6, 1, kernel_size=3, padding=1, bias=True)
+        nn.init.zeros_(self.spatial_gate.weight)
+        nn.init.constant_(self.spatial_gate.bias, _logit(gate_init))
+
+        self.q_proj = LocalQKVProj(c1, c_mid)
+        self.kv_proj = LocalQKVProj(c1, c_mid)
+        self.out_proj = nn.Conv2d(c_mid, c1, 1, bias=False)
+
+        self.log_temperature = nn.Parameter(torch.zeros(1))
+        self.local_scale = nn.Parameter(torch.ones(1, c1, 1, 1) * float(local_init))
+        self.attn_scale = nn.Parameter(torch.ones(1, c1, 1, 1) * float(attn_init))
+
+        if self.use_ir_update:
+            self.rgb_adapter = DWGroupBlock(c1, groups=groups)
+            self.ir_update_scale = nn.Parameter(torch.ones(1, c1, 1, 1) * 0.005)
+
+    def _spatial_gate(self, x_rgb, x_ir_a):
+        rgb_m = x_rgb.mean(dim=1, keepdim=True)
+        ir_m = x_ir_a.mean(dim=1, keepdim=True)
+        diff_m = (x_rgb - x_ir_a).abs().mean(dim=1, keepdim=True)
+        prod_m = (x_rgb * x_ir_a).mean(dim=1, keepdim=True)
+        rgb_hf = high_frequency_map(x_rgb)
+        ir_hf = high_frequency_map(x_ir_a)
+
+        gate_input = torch.cat([rgb_m, ir_m, diff_m, prod_m, rgb_hf, ir_hf], dim=1)
+        return torch.sigmoid(self.spatial_gate(gate_input))
+
+    def _sparse_attn(self, q_feat, kv_feat):
+        b, c, h, w = q_feat.shape
+        q = q_feat.flatten(2)
+        k = kv_feat.flatten(2)
+        v = kv_feat.flatten(2)
+
+        q = F.normalize(q, dim=-1, eps=1e-6)
+        k = F.normalize(k, dim=-1, eps=1e-6)
+
+        temperature = torch.exp(self.log_temperature).clamp(max=20.0)
+        attn = torch.bmm(q, k.transpose(1, 2))
+        attn = F.relu(temperature * attn)
+
+        if self.norm_attn:
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+
+        y = torch.bmm(attn, v)
+        return y.view(b, c, h, w)
+
+    def forward(self, x):
+        assert isinstance(x, torch.Tensor), "SparseRIFusion expects a concatenated tensor [B, 2C, H, W], not a list."
+        b, c2, h, w = x.shape
+        assert c2 == self.c1 * 2, f"SparseRIFusion expected {self.c1 * 2} channels, got {c2}"
+
+        x_rgb, x_ir = torch.chunk(x, 2, dim=1)
+        x_ir_a = self.ir_adapter(x_ir)
+
+        s_ir = self._spatial_gate(x_rgb, x_ir_a)
+        local_delta = s_ir * x_ir_a
+
+        q_rgb = self.q_proj(x_rgb)
+        kv_ir = self.kv_proj(x_ir_a)
+        attn_delta = self.out_proj(self._sparse_attn(q_rgb, kv_ir))
+
+        x_rgb_out = x_rgb + self.local_scale * local_delta + self.attn_scale * attn_delta
+        x_ir_out = x_ir + self.ir_update_scale * self.rgb_adapter(x_rgb) if self.use_ir_update else x_ir
+
+        return torch.cat([x_rgb_out, x_ir_out], dim=1)
+
+
+class RILateSparseGatedFuse(nn.Module):
+    """Sparse gated RGB-primary late fusion for PANet inputs."""
+
+    def __init__(
+        self,
+        c1,
+        reduction=16,
+        min_ch=16,
+        max_ch=32,
+        gate_init=1.0,
+        ir_max=1.5,
+        beta_init=0.02,
+        align_init=0.01,
+        groups=16,
+        norm_attn=True,
+    ):
+        super().__init__()
+        assert c1 > 0
+        assert reduction > 0
+        assert min_ch > 0 and max_ch >= min_ch
+        assert 0.0 < gate_init < ir_max
+
+        c_mid = min(max(c1 // reduction, min_ch), max_ch)
+
+        self.c1 = c1
+        self.c_mid = c_mid
+        self.ir_max = float(ir_max)
+        self.norm_attn = bool(norm_attn)
+
+        self.ir_adapter = DWGroupBlock(c1, groups=groups)
+        self.align_scale = nn.Parameter(torch.ones(1, c1, 1, 1) * float(align_init))
+
+        self.spatial_gate = nn.Conv2d(6, 1, kernel_size=3, padding=1, bias=True)
+        self.channel_gate = nn.Conv1d(3, 1, kernel_size=3, padding=1, bias=False)
+
+        nn.init.zeros_(self.spatial_gate.weight)
+        nn.init.zeros_(self.spatial_gate.bias)
+        nn.init.zeros_(self.channel_gate.weight)
+
+        self.gate_bias = nn.Parameter(torch.tensor(_scaled_gate_bias(gate_init, ir_max), dtype=torch.float32))
+
+        self.q_proj = LocalQKVProj(c1, c_mid)
+        self.kv_proj = LocalQKVProj(c1, c_mid)
+        self.out_proj = nn.Conv2d(c_mid, c1, 1, bias=False)
+
+        self.log_temperature = nn.Parameter(torch.zeros(1))
+        self.beta = nn.Parameter(torch.ones(1, c1, 1, 1) * float(beta_init))
+
+    def _ir_gate(self, x_rgb, x_ir_a):
+        b, c, h, w = x_rgb.shape
+
+        rgb_m = x_rgb.mean(dim=1, keepdim=True)
+        ir_m = x_ir_a.mean(dim=1, keepdim=True)
+        diff_m = (x_rgb - x_ir_a).abs().mean(dim=1, keepdim=True)
+        prod_m = (x_rgb * x_ir_a).mean(dim=1, keepdim=True)
+        rgb_hf = high_frequency_map(x_rgb)
+        ir_hf = high_frequency_map(x_ir_a)
+
+        spatial_input = torch.cat([rgb_m, ir_m, diff_m, prod_m, rgb_hf, ir_hf], dim=1)
+        spatial_logit = self.spatial_gate(spatial_input)
+
+        rgb_c = x_rgb.mean(dim=(2, 3))
+        ir_c = x_ir_a.mean(dim=(2, 3))
+        diff_c = (x_rgb - x_ir_a).abs().mean(dim=(2, 3))
+        channel_input = torch.stack([rgb_c, ir_c, diff_c], dim=1)
+        channel_logit = self.channel_gate(channel_input).view(b, c, 1, 1)
+
+        return self.ir_max * torch.sigmoid(self.gate_bias + spatial_logit + channel_logit)
+
+    def _sparse_attn(self, q_feat, kv_feat):
+        b, c, h, w = q_feat.shape
+        q = q_feat.flatten(2)
+        k = kv_feat.flatten(2)
+        v = kv_feat.flatten(2)
+
+        q = F.normalize(q, dim=-1, eps=1e-6)
+        k = F.normalize(k, dim=-1, eps=1e-6)
+
+        temperature = torch.exp(self.log_temperature).clamp(max=20.0)
+        attn = torch.bmm(q, k.transpose(1, 2))
+        attn = F.relu(temperature * attn)
+
+        if self.norm_attn:
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+
+        y = torch.bmm(attn, v)
+        return y.view(b, c, h, w)
+
+    def forward(self, x):
+        assert isinstance(x, (list, tuple)) and len(x) == 2, "RILateSparseGatedFuse expects [x_rgb, x_ir]"
+        x_rgb, x_ir = x
+        assert x_rgb.shape == x_ir.shape, f"RILateSparseGatedFuse expects same shape, got {x_rgb.shape} and {x_ir.shape}"
+
+        x_ir_a = x_ir + self.align_scale * self.ir_adapter(x_ir)
+        w_ir = self._ir_gate(x_rgb, x_ir_a)
+        base = x_rgb + w_ir * x_ir_a
+
+        q_rgb = self.q_proj(x_rgb)
+        kv_ir = self.kv_proj(w_ir * x_ir_a)
+        delta = self.out_proj(self._sparse_attn(q_rgb, kv_ir))
+
+        return base + self.beta * delta
+
+
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
@@ -2957,6 +3233,4 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
-
 

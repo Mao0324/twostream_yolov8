@@ -51,6 +51,8 @@ from ultralytics.nn.modules import (
     WorldDetect,
     Concat2,
     ADD,
+    SparseRIFusion,
+    RILateSparseGatedFuse,
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -1061,10 +1063,20 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 #            print("ch[f]", f, ch[f[0]])
             c2 = ch[f[0]]
             args = [c2]  
+        elif m is RILateSparseGatedFuse:
+            assert isinstance(f, list) and len(f) == 2
+            c_rgb, c_ir = ch[f[0]], ch[f[1]]
+            assert c_rgb == c_ir
+            c2 = c_rgb
+            args = [c_rgb, *args]
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]
             args = [c1,c2] 
+        elif m is SparseRIFusion:
+            c1 = ch[-1]
+            c2 = c1
+            args = [c1, *args]
         elif m is RIFusion:
             args = [args[0]] 
         elif m in {SKAttention,GLF,NAM,GLCBAM,GCBAM,SACBAM,CSFM}:
@@ -1177,7 +1189,7 @@ def yaml_model_load(path):
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
     d = yaml_load(yaml_file)  # model dict
-    d["scale"] = guess_model_scale(path)
+    d["scale"] = guess_model_scale(path) or d.get("scale", "")
     d["yaml_file"] = str(path)
     return d
 
