@@ -1,0 +1,38 @@
+(spikeyolo) biiteam@biiteam-SYS-4028GR-TR:~/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2$ python test.py
+Ultralytics YOLOv8.1.47 🚀 Python-3.9.0 torch-2.0.0+cu117 CUDA:0 (NVIDIA GeForce RTX 3090, 24133MiB)
+PC2f_MPF_YOLOv8s summary (fused): 269 layers, 14720936 parameters, 0 gradients, 36.7 GFLOPs
+val: Scanning /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/labels... 3237 images, 0 backgrounds, 0 corrupt: 100%|██████████| 3237/3237 [00:07<00:00, 448.77it/s]
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/1405.jpg: 1 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/1412.jpg: 1 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/1435.jpg: 1 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/179.jpg: 4 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/405.jpg: 1 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/417.jpg: 2 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/4714.jpg: 32 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/4718.jpg: 16 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/4898.jpg: 21 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/5118.jpg: 2 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/6793.jpg: 7 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/688.jpg: 1 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/8255.jpg: 2 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/8256.jpg: 2 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/8257.jpg: 2 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/8258.jpg: 2 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/8519.jpg: 10 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/86.jpg: 1 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/9931.jpg: 1 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/9972.jpg: 3 duplicate labels removed
+val: WARNING ⚠️ /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/images/9973.jpg: 1 duplicate labels removed
+val: New cache created: /home/biiteam/Storage-4T/biiteam/MCONG/datasets/ESCVehicle/visible/labels.cache
+                 Class     Images  Instances      Box(P          R      mAP50  mAP50-95): 100%|██████████| 203/203 [01:06<00:00,  3.04it/s]
+                   all       3237      53086      0.639      0.515      0.547      0.426
+                   car       3237      35494      0.758      0.829      0.818      0.656
+                 truck       3237        362      0.588      0.376       0.41        0.3
+                   bus       3237        590      0.688      0.631      0.689      0.549
+                   van       3237       2808      0.523      0.446      0.469      0.385
+           freight car       3237       1198      0.696      0.271      0.405      0.323
+                   suv       3237      12229      0.507      0.583      0.523       0.42
+  construction vehicle       3237        405       0.71      0.469      0.519      0.349
+Speed: 0.6ms preprocess, 4.1ms inference, 0.0ms loss, 3.6ms postprocess per image
+前向传播 FPS:242.66
+Results saved to /home/biiteam/Storage-3.5T/WBY/v1_basespike_rgbir/runs_flir/obb/val11
