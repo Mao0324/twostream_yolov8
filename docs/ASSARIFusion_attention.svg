@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="960" viewBox="0 0 1500 960" role="img" aria-labelledby="title desc">
+  <title id="title">ASSARIFusion attention mechanism</title>
+  <desc id="desc">Diagram of the ASSARIFusion module and its SparseCrossChannelAttention2d branch.</desc>
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5563"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .bg { fill: #f8fafc; }
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; rx: 14; filter: url(#shadow); }
+      .box { fill: #ffffff; stroke: #334155; stroke-width: 1.6; rx: 9; }
+      .rgb { fill: #eff6ff; stroke: #2563eb; }
+      .ir { fill: #fef2f2; stroke: #dc2626; }
+      .attn { fill: #f0fdf4; stroke: #16a34a; }
+      .op { fill: #fefce8; stroke: #ca8a04; }
+      .out { fill: #f5f3ff; stroke: #7c3aed; }
+      .title { font: 700 34px Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 500 18px Arial, sans-serif; fill: #475569; }
+      .label { font: 700 18px Arial, sans-serif; fill: #0f172a; }
+      .small { font: 500 14px Arial, sans-serif; fill: #334155; }
+      .tiny { font: 500 12px Arial, sans-serif; fill: #475569; }
+      .math { font: 600 15px Arial, sans-serif; fill: #1e293b; }
+      .arrow-blue { stroke: #2563eb; stroke-width: 3; fill: none; marker-end: url(#arrow-blue); }
+      .arrow-red { stroke: #dc2626; stroke-width: 3; fill: none; marker-end: url(#arrow-red); }
+      .arrow-gray { stroke: #4b5563; stroke-width: 2.4; fill: none; marker-end: url(#arrow-gray); }
+      .dash { stroke-dasharray: 7 6; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1500" height="960"/>
+
+  <text class="title" x="750" y="58" text-anchor="middle">ASSARIFusion 注意力机制图</text>
+  <text class="subtitle" x="750" y="88" text-anchor="middle">输入 [B, 2C, H, W]，拆成 RGB/IR 两路，使用共享 SparseCrossChannelAttention2d 做双向跨模态通道注意力</text>
+
+  <rect class="panel" x="55" y="130" width="1390" height="270"/>
+  <text class="label" x="92" y="166">1. ASSARIFusion 总体流程</text>
+
+  <rect class="box" x="95" y="205" width="150" height="70"/>
+  <text class="label" x="170" y="235" text-anchor="middle">输入 x</text>
+  <text class="small" x="170" y="258" text-anchor="middle">[B, 2C, H, W]</text>
+
+  <rect class="box op" x="310" y="205" width="160" height="70"/>
+  <text class="label" x="390" y="235" text-anchor="middle">torch.chunk</text>
+  <text class="small" x="390" y="258" text-anchor="middle">dim=1 拆通道</text>
+
+  <rect class="box rgb" x="545" y="165" width="180" height="70"/>
+  <text class="label" x="635" y="195" text-anchor="middle">RGB 特征</text>
+  <text class="small" x="635" y="218" text-anchor="middle">rgb [B, C, H, W]</text>
+
+  <rect class="box ir" x="545" y="285" width="180" height="70"/>
+  <text class="label" x="635" y="315" text-anchor="middle">IR 特征</text>
+  <text class="small" x="635" y="338" text-anchor="middle">ir [B, C, H, W]</text>
+
+  <rect class="box attn" x="800" y="150" width="230" height="90"/>
+  <text class="label" x="915" y="180" text-anchor="middle">xattn(rgb, ir)</text>
+  <text class="small" x="915" y="204" text-anchor="middle">src=RGB, ref=IR</text>
+  <text class="small" x="915" y="225" text-anchor="middle">输出 delta_rgb</text>
+
+  <rect class="box attn" x="800" y="280" width="230" height="90"/>
+  <text class="label" x="915" y="310" text-anchor="middle">xattn(ir, rgb)</text>
+  <text class="small" x="915" y="334" text-anchor="middle">src=IR, ref=RGB</text>
+  <text class="small" x="915" y="355" text-anchor="middle">输出 delta_ir</text>
+
+  <rect class="box op" x="1090" y="165" width="155" height="70"/>
+  <text class="label" x="1168" y="195" text-anchor="middle">残差回加</text>
+  <text class="small" x="1168" y="218" text-anchor="middle">rgb + scale_rgb * delta</text>
+
+  <rect class="box op" x="1090" y="285" width="155" height="70"/>
+  <text class="label" x="1168" y="315" text-anchor="middle">残差回加</text>
+  <text class="small" x="1168" y="338" text-anchor="middle">ir + scale_ir * delta</text>
+
+  <rect class="box out" x="1310" y="225" width="95" height="90"/>
+  <text class="label" x="1358" y="258" text-anchor="middle">cat</text>
+  <text class="small" x="1358" y="280" text-anchor="middle">dim=1</text>
+  <text class="small" x="1358" y="302" text-anchor="middle">[B,2C,H,W]</text>
+
+  <path class="arrow-gray" d="M245 240 L310 240"/>
+  <path class="arrow-gray" d="M470 240 C505 240 505 200 545 200"/>
+  <path class="arrow-gray" d="M470 240 C505 240 505 320 545 320"/>
+  <path class="arrow-blue" d="M725 200 L800 195"/>
+  <path class="arrow-red" d="M725 320 L800 325"/>
+  <path class="arrow-red dash" d="M725 320 C760 320 760 230 800 205"/>
+  <path class="arrow-blue dash" d="M725 200 C760 200 760 290 800 315"/>
+  <path class="arrow-blue" d="M1030 195 L1090 200"/>
+  <path class="arrow-red" d="M1030 325 L1090 320"/>
+  <path class="arrow-blue" d="M1245 200 C1280 200 1280 250 1310 255"/>
+  <path class="arrow-red" d="M1245 320 C1280 320 1280 290 1310 285"/>
+
+  <rect class="panel" x="55" y="435" width="1390" height="455"/>
+  <text class="label" x="92" y="472">2. 单个 SparseCrossChannelAttention2d(src, ref) 分支展开</text>
+  <text class="small" x="92" y="500">以 delta_rgb = xattn(rgb, ir) 为例：RGB 作为 Query 来源，IR 作为 Key/Value 来源。反向分支只交换 src/ref。</text>
+
+  <rect class="box rgb" x="95" y="545" width="130" height="62"/>
+  <text class="label" x="160" y="572" text-anchor="middle">src</text>
+  <text class="small" x="160" y="594" text-anchor="middle">RGB</text>
+
+  <rect class="box ir" x="95" y="710" width="130" height="62"/>
+  <text class="label" x="160" y="737" text-anchor="middle">ref</text>
+  <text class="small" x="160" y="759" text-anchor="middle">IR</text>
+
+  <rect class="box" x="280" y="545" width="145" height="62"/>
+  <text class="label" x="353" y="572" text-anchor="middle">LayerNorm2d</text>
+  <text class="small" x="353" y="594" text-anchor="middle">norm_src</text>
+
+  <rect class="box" x="280" y="710" width="145" height="62"/>
+  <text class="label" x="353" y="737" text-anchor="middle">LayerNorm2d</text>
+  <text class="small" x="353" y="759" text-anchor="middle">norm_ref</text>
+
+  <rect class="box" x="480" y="545" width="145" height="62"/>
+  <text class="label" x="553" y="572" text-anchor="middle">1x1 Conv</text>
+  <text class="small" x="553" y="594" text-anchor="middle">q_proj: C -> hidden</text>
+
+  <rect class="box" x="480" y="710" width="145" height="62"/>
+  <text class="label" x="553" y="737" text-anchor="middle">1x1 Conv</text>
+  <text class="small" x="553" y="759" text-anchor="middle">kv_proj: C -> hidden</text>
+
+  <rect class="box" x="685" y="545" width="145" height="62"/>
+  <text class="label" x="758" y="572" text-anchor="middle">3x3 DWConv</text>
+  <text class="small" x="758" y="594" text-anchor="middle">q + q_dw(q)</text>
+
+  <rect class="box" x="685" y="710" width="145" height="62"/>
+  <text class="label" x="758" y="737" text-anchor="middle">3x3 DWConv</text>
+  <text class="small" x="758" y="759" text-anchor="middle">kv + kv_dw(kv)</text>
+
+  <rect class="box op" x="885" y="545" width="145" height="62"/>
+  <text class="label" x="958" y="572" text-anchor="middle">reshape</text>
+  <text class="small" x="958" y="594" text-anchor="middle">Q: [B,h,d,HW]</text>
+
+  <rect class="box op" x="885" y="710" width="145" height="62"/>
+  <text class="label" x="958" y="737" text-anchor="middle">reshape</text>
+  <text class="small" x="958" y="759" text-anchor="middle">K,V: [B,h,d,HW]</text>
+
+  <rect class="box op" x="1080" y="545" width="150" height="62"/>
+  <text class="label" x="1155" y="572" text-anchor="middle">L2 normalize</text>
+  <text class="small" x="1155" y="594" text-anchor="middle">dim=-1</text>
+
+  <rect class="box op" x="1080" y="710" width="150" height="62"/>
+  <text class="label" x="1155" y="737" text-anchor="middle">L2 normalize</text>
+  <text class="small" x="1155" y="759" text-anchor="middle">dim=-1</text>
+
+  <rect class="box attn" x="1280" y="602" width="130" height="92"/>
+  <text class="label" x="1345" y="630" text-anchor="middle">Attention</text>
+  <text class="tiny" x="1345" y="654" text-anchor="middle">Q x K^T</text>
+  <text class="tiny" x="1345" y="674" text-anchor="middle">* temperature</text>
+
+  <rect class="box attn" x="1120" y="812" width="130" height="58"/>
+  <text class="label" x="1185" y="837" text-anchor="middle">ReLU</text>
+  <text class="small" x="1185" y="858" text-anchor="middle">负值置零</text>
+
+  <rect class="box attn" x="950" y="812" width="130" height="58"/>
+  <text class="label" x="1015" y="837" text-anchor="middle">row norm</text>
+  <text class="small" x="1015" y="858" text-anchor="middle">sum + 1e-6</text>
+
+  <rect class="box op" x="760" y="812" width="140" height="58"/>
+  <text class="label" x="830" y="837" text-anchor="middle">attn x V</text>
+  <text class="small" x="830" y="858" text-anchor="middle">通道混合</text>
+
+  <rect class="box op" x="575" y="812" width="135" height="58"/>
+  <text class="label" x="643" y="837" text-anchor="middle">reshape</text>
+  <text class="small" x="643" y="858" text-anchor="middle">[B, hidden, H, W]</text>
+
+  <rect class="box out" x="390" y="812" width="135" height="58"/>
+  <text class="label" x="458" y="837" text-anchor="middle">1x1 Conv</text>
+  <text class="small" x="458" y="858" text-anchor="middle">out_proj: hidden -> C</text>
+
+  <rect class="box out" x="185" y="812" width="145" height="58"/>
+  <text class="label" x="258" y="837" text-anchor="middle">delta_rgb</text>
+  <text class="small" x="258" y="858" text-anchor="middle">[B, C, H, W]</text>
+
+  <path class="arrow-blue" d="M225 576 L280 576"/>
+  <path class="arrow-blue" d="M425 576 L480 576"/>
+  <path class="arrow-blue" d="M625 576 L685 576"/>
+  <path class="arrow-blue" d="M830 576 L885 576"/>
+  <path class="arrow-blue" d="M1030 576 L1080 576"/>
+  <path class="arrow-blue" d="M1230 576 C1260 576 1260 625 1280 635"/>
+
+  <path class="arrow-red" d="M225 741 L280 741"/>
+  <path class="arrow-red" d="M425 741 L480 741"/>
+  <path class="arrow-red" d="M625 741 L685 741"/>
+  <path class="arrow-red" d="M830 741 L885 741"/>
+  <path class="arrow-red" d="M1030 741 L1080 741"/>
+  <path class="arrow-red" d="M1230 741 C1260 741 1260 675 1280 660"/>
+  <path class="arrow-red dash" d="M958 772 C958 800 865 800 830 812"/>
+
+  <path class="arrow-gray" d="M1345 694 C1345 760 1240 790 1185 812"/>
+  <path class="arrow-gray" d="M1120 841 L1080 841"/>
+  <path class="arrow-gray" d="M950 841 L900 841"/>
+  <path class="arrow-gray" d="M760 841 L710 841"/>
+  <path class="arrow-gray" d="M575 841 L525 841"/>
+  <path class="arrow-gray" d="M390 841 L330 841"/>
+
+  <text class="math" x="92" y="924">核心公式：A = normalize(ReLU((normalize(Q) @ normalize(K)^T) * temperature));  delta = out_proj(reshape(A @ V))</text>
+</svg>
