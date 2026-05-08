@@ -51,6 +51,8 @@ from .block import (
     ADD,
     ASSAAdd,
     ASSARIFusion,
+    ASSARIFusion_v2,
+    ASSARIFusion_v3,
     ASSARefine,
     SimAM,
     ShuffleAttention,
@@ -170,5 +172,7 @@ __all__ = (
     "Silence",
     "ASSAAdd",
     "ASSARIFusion",
+    "ASSARIFusion_v2",
+    "ASSARIFusion_v3",
     "ASSARefine",
 )

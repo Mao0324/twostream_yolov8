@@ -1,0 +1,162 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# YOLOv8 two-stream OBB with ASSARIFusion_v3 (+per-channel scale, +delta gating, +post-concat DWConv) and ASSAAdd.
+#
+# ============================================================================
+# 消融配置: ASSARIFusion_v3（建议2+3+5）
+# ============================================================================
+#
+# 【新增机制】(在 v2 基础上增加 delta gating)
+#
+#   继承 v2 的 per-channel scale（建议5）和 post-concat DWConv（建议2），
+#   额外增加 Delta Gating（建议3）：
+#
+#   (3) Delta Gating（建议3）
+#       原始 (v1):
+#         rgb = rgb + scale_rgb * delta_rgb      # delta 无条件加到原特征
+#         ir  = ir  + scale_ir  * delta_ir
+#
+#       改进:
+#         joint_delta = cat([delta_rgb, delta_ir], dim=1)  # [B, 2c, H, W]
+#         gate = sigmoid(gate_conv(joint_delta))            # [B, 2, H, W]
+#         gate_rgb, gate_ir = gate[:, :1], gate[:, 1:]      # 各 [B, 1, H, W]
+#         rgb = rgb + scale_rgb[per-ch] * delta_rgb * gate_rgb
+#         ir  = ir  + scale_ir[per-ch]  * delta_ir  * gate_ir
+#
+#       动机: RGB 和 IR 的 attention delta 是独立计算的，没有跨模态协调。
+#             某些空间位置可能只需要单向修正（如 RGB 纹理区不需要 IR delta），
+#             也可能两个 delta 在某些位置互相矛盾。
+#             Gate 基于两个 delta 的 joint 特征预测空间权重：
+#             - gate≈1: 该位置充分接受 delta 修正
+#             - gate≈0: 该位置忽略 delta，保持原特征不变
+#             gate_conv=Conv2d(2c→2, 3×3) 同时看到两个 delta，
+#             能学会在不同空间区域选择性激活不同模态的修正。
+#
+#       实现: gate_conv 是 2c→2 的 3×3 卷积（带 padding），输出 2 通道
+#             分别作为 RGB delta 和 IR delta 的空间门控图。
+#             sigmoid 将门控值约束到 [0, 1]。
+#             参数量: 18×c per fusion stage，总共约 16K。
+#
+#   v3 完整 forward 流程:
+#     rgb, ir = chunk(cat, 2)
+#     delta_rgb = xattn(rgb, ir)           # SparseCrossChannelAttention
+#     delta_ir  = xattn(ir, rgb)
+#     joint = cat([delta_rgb, delta_ir])   # [B, 2c, H, W]
+#     gate = sigmoid(gate_conv(joint))     # [B, 2, H, W]   ← 新增门控
+#     rgb = rgb + scale_rgb[per-ch] * delta_rgb * gate_rgb   ← 门控修正
+#     ir  = ir  + scale_ir[per-ch]  * delta_ir  * gate_ir
+#     out = cat([rgb, ir])                 # [B, 2c, H, W]
+#     out = out + post_scale * post_dw(out)  ← DWConv 空间精炼
+#     return out
+#
+# 【预期效果】
+#   - Delta gating 解决跨模态 delta 的空间冲突问题
+#   - 预期在遮挡/纹理稀疏/多目标场景下表现更好
+#   - 在 v2 基础上预期再提升 0.1~0.3% mAP50
+#
+# 【总参数量变化】
+#   v2 增量 (~18K) + gate_conv (~16K) ≈ +34K
+#   相对于约 11M 的总参数量，仍可忽略不计
+#
+# ============================================================================
+
+nc: 7
+scales:
+  #n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+scale: s
+
+backbone:
+  # ------------------------------------------------------------------
+  # RGB 支路
+  # ------------------------------------------------------------------
+  - [-1, 1, Conv, [64, 3, 2]]     # 0-P1/2   RGB Conv 下采样
+  - [-1, 1, Conv, [128, 3, 2]]    # 1-P2/4   RGB Conv 下采样
+  - [-1, 3, C2f, [128, True]]     # 2        RGB C2f
+  - [-1, 1, Conv, [256, 3, 2]]    # 3-P3/8   RGB Conv 下采样（第1个多尺度点）
+
+  # ------------------------------------------------------------------
+  # IR 支路（from=-4 触发支路切换，从 layer 4 开始使用 IR 输入）
+  # ------------------------------------------------------------------
+  - [-4, 1, Conv, [64, 3, 2]]     # 4        IR Conv 下采样（from=-4 切换支路）
+  - [-1, 1, Conv, [128, 3, 2]]    # 5        IR Conv 下采样
+  - [-1, 3, C2f_Faster, [128, True]]  # 6    IR C2f（轻量版）
+  - [-1, 1, Conv, [256, 3, 2]]    # 7        IR Conv 下采样（第1个多尺度点）
+
+  # ------------------------------------------------------------------
+  # ASSARIFusion_v3 第一处 @ P3/8 (c=128)
+  # 包含: per-channel scale + delta gating + post-concat DWConv
+  #
+  #   rgb, ir = chunk(cat, 2)
+  #   ① delta_rgb = xattn(rgb, ir), delta_ir = xattn(ir, rgb)   # 交叉注意力
+  #   ② gate = sigmoid(gate_conv([delta_rgb, delta_ir]))        # 联合门控
+  #   ③ rgb += scale_rgb[per-ch] * delta_rgb * gate_rgb         # 逐通道+门控
+  #   ④ ir  += scale_ir[per-ch]  * delta_ir  * gate_ir
+  #   ⑤ out = cat([rgb, ir]) + post_scale * post_dw(cat)        # 空间精炼
+  # ------------------------------------------------------------------
+  - [-3, 1, ASSARIFusion_v3, [64, 8, 2, True]]  # 8
+
+  # ------------------------------------------------------------------
+  # Stage 2: P3/8 → P4/16
+  # ------------------------------------------------------------------
+  - [-4, 6, C2f, [256, True]]     # 9  P3/8  RGB C2f  ← ASSAAdd 输入点1
+  - [-1, 1, Conv, [512, 3, 2]]    # 10 P4/16 RGB Conv 下采样
+  - [-4, 6, C2f_Faster, [256, True]]  # 11 P3/8  IR C2f   ← ASSAAdd 输入点1
+  - [-1, 1, Conv, [512, 3, 2]]    # 12 P4/16 IR Conv 下采样
+
+  # ------------------------------------------------------------------
+  # ASSARIFusion_v3 第二处 @ P4/16 (c=256)
+  # 同 layer 8，c=256, heads=4
+  # ------------------------------------------------------------------
+  - [-3, 1, ASSARIFusion_v3, [128, 8, 4, True]]  # 13
+
+  # ------------------------------------------------------------------
+  # Stage 3: P4/16 → P5/32
+  # ------------------------------------------------------------------
+  - [-4, 6, C2f, [512, True]]     # 14 P4/16 RGB C2f  ← ASSAAdd 输入点2
+  - [-1, 1, Conv, [1024, 3, 2]]   # 15 P5/32 RGB Conv 下采样
+  - [-4, 6, C2f_Faster, [512, True]]  # 16 P4/16 IR C2f  ← ASSAAdd 输入点2
+  - [-1, 1, Conv, [1024, 3, 2]]   # 17 P5/32 IR Conv 下采样
+
+  # ------------------------------------------------------------------
+  # ASSARIFusion_v3 第三处 @ P5/32 (c=512)
+  # 同 layer 8，c=512, heads=4
+  # ------------------------------------------------------------------
+  - [-3, 1, ASSARIFusion_v3, [256, 8, 4, True]]  # 18
+
+  # ------------------------------------------------------------------
+  # Stage 4: SPPF
+  # ------------------------------------------------------------------
+  - [-4, 3, C2f, [1024, True]]    # 19 P5/32 RGB C2f
+  - [-1, 1, SPPF, [1024, 5]]      # 20 P5/32 RGB SPPF ← ASSAAdd 输入点3
+  - [-4, 3, C2f_Faster, [1024, True]]  # 21 P5/32 IR C2f
+  - [-1, 1, SPPF, [1024, 5]]      # 22 P5/32 IR SPPF  ← ASSAAdd 输入点3
+
+  # ------------------------------------------------------------------
+  # 末端融合: ASSAAdd（加法基底 + 交叉注意力残差）
+  # 两模态在此合并为单一特征图，之后进入共享的 FPN+PAN
+  # ------------------------------------------------------------------
+  - [[9, 11], 1, ASSAAdd, [8, 2, True]]    # 23 P3/8  base+attn残差
+  - [[14, 16], 1, ASSAAdd, [8, 4, True]]   # 24 P4/16 base+attn残差
+  - [[20, 22], 1, ASSAAdd, [8, 4, True]]   # 25 P5/32 base+attn残差
+
+head:
+  # FPN (自上而下)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]       # 26 P5→P4
+  - [[-1, 24], 1, Concat, [1]]                        # 27 P4 特征拼接
+  - [-1, 3, C2f, [512]]                               # 28 P4 融合
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]       # 29 P4→P3
+  - [[-1, 23], 1, Concat, [1]]                        # 30 P3 特征拼接
+  - [-1, 3, C2f, [256]]                               # 31 P3 融合（OBB 输入1）
+
+  # PAN (自下而上)
+  - [-1, 1, Conv, [256, 3, 2]]                        # 32 P3→P4
+  - [[-1, 28], 1, Concat, [1]]                        # 33 P4 特征拼接
+  - [-1, 3, C2f, [512]]                               # 34 P4 融合（OBB 输入2）
+  - [-1, 1, Conv, [512, 3, 2]]                        # 35 P4→P5
+  - [[-1, 25], 1, Concat, [1]]                        # 36 P5 特征拼接
+  - [-1, 3, C2f, [1024]]                              # 37 P5 融合（OBB 输入3）
+
+  - [[31, 34, 37], 1, OBB, [nc, 1]]

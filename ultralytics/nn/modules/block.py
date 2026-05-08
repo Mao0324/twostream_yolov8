@@ -1728,6 +1728,79 @@ class ASSARIFusion(nn.Module):
         return torch.cat([rgb, ir], dim=1)
 
 
+class ASSARIFusion_v2(nn.Module):
+    """ASSA-style intermediate RGB/IR fusion v2: +per-channel scale, +post-concat DWConv.
+
+    Args:
+        c: channels per stream (total input = 2*c)
+        reduction: bottleneck reduction for cross-channel attention
+        heads: number of attention heads
+        norm_attn: whether to L1-normalize attention weights
+        init_scale: initial value for learnable scale parameters
+    """
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.post_dw = nn.Conv2d(2 * c, 2 * c, 3, padding=1, groups=2 * c, bias=False)
+        self.post_scale = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse concatenated RGB/IR feature tensor with post-concat spatial refinement."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSARIFusion_v2 expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        out = torch.cat([rgb, ir], dim=1)
+        return out + self.post_scale * self.post_dw(out)
+
+
+class ASSARIFusion_v3(nn.Module):
+    """ASSA-style intermediate RGB/IR fusion v3: v2 + delta gating.
+
+    Learns spatial gates from joint delta features to modulate per-stream
+    attention residuals before the post-concat depthwise refinement.
+
+    Args:
+        c: channels per stream (total input = 2*c)
+        reduction: bottleneck reduction for cross-channel attention
+        heads: number of attention heads
+        norm_attn: whether to L1-normalize attention weights
+        init_scale: initial value for learnable scale parameters
+    """
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.gate_conv = nn.Conv2d(2 * c, 2, 3, padding=1, bias=False)
+        self.post_dw = nn.Conv2d(2 * c, 2 * c, 3, padding=1, groups=2 * c, bias=False)
+        self.post_scale = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse concatenated RGB/IR feature tensor with delta gating and post-concat refinement."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSARIFusion_v3 expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        joint = torch.cat([delta_rgb, delta_ir], dim=1)
+        gate = torch.sigmoid(self.gate_conv(joint))
+        gate_rgb, gate_ir = gate[:, :1], gate[:, 1:]
+        rgb = rgb + self.scale_rgb * delta_rgb * gate_rgb
+        ir = ir + self.scale_ir * delta_ir * gate_ir
+        out = torch.cat([rgb, ir], dim=1)
+        return out + self.post_scale * self.post_dw(out)
+
+
 class ASSARefine(nn.Module):
     """ASSA-style self refinement, input [B, C, H, W], output [B, C, H, W]."""
 
