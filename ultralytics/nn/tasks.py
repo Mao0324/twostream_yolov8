@@ -54,6 +54,8 @@ from ultralytics.nn.modules import (
     ASSAAdd,
     ASSARIFusion,
     ASSARefine,
+    MPSFusion,
+    MPSAdd,
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -1068,6 +1070,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = ch[f[0]]
             assert ch[f[0]] == ch[f[1]], f"ASSAAdd input channels must match, got {ch[f[0]]} and {ch[f[1]]}"
             args = [c2, *args]
+        elif m is MPSAdd:
+            c2 = ch[f[0]]
+            assert ch[f[0]] == ch[f[1]], f"MPSAdd input channels must match, got {ch[f[0]]} and {ch[f[1]]}"
+            args = [c2, *args]
         elif m is ASSARefine:
             c2 = ch[f]
             args = [c2, *args]
@@ -1078,6 +1084,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is RIFusion:
             args = [args[0]] 
         elif m is ASSARIFusion:
+            c2 = ch[-1]
+            args = [c2, *args[1:]]
+        elif m is MPSFusion:
             c2 = ch[-1]
             args = [c2, *args[1:]]
         elif m in {SKAttention,GLF,NAM,GLCBAM,GCBAM,SACBAM,CSFM}:

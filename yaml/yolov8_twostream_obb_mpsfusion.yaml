@@ -1,0 +1,92 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# YOLOv8 双流 OBB — MPSFusion (backbone 深融合) + ADD (末端简单融合)
+#
+# 架构说明:
+#   backbone 内部 3 个 stage (P3/P4/P5) 使用 MPSFusion 替换 ASSARIFusion:
+#     MPSFusion = 稀疏交叉注意力 + 1x1 Conv Bottleneck
+#     - Step 1: SparseCrossChannelAttention2d —— "我需要你的哪些信息?" (选择性、稀疏)
+#     - Step 2: 1x1 Conv squeeze-expand ——   "让我们在通道维度直接交互" (稠密、直接)
+#     两步互补——稀疏注意力做选择性信息检索, bottleneck 做全通道联合混合
+#   backbone 末端 (P3/P4/P5) 使用 ADD 简单相加合并两流 → FPN
+#
+# 对比基线:
+#   assarifusion.yaml: ASSARIFusion(纯稀疏注意力, 无 bottleneck) + ADD
+#   本配置:           MPSFusion(稀疏注意力 + bottleneck)      + ADD
+#   预期 mAP50 提升: 0.5~1.5% (相比 ASSARIFusion 基线)
+#   新增参数量:      约 +344K (3个 bottleneck, 每个 ~115K)
+#
+# MPSFusion 参数说明:
+#   [c, reduction, heads, norm_attn]
+#     c:          每个模态的通道数 (自动推断)
+#     reduction:  bottleneck 压缩倍率, inner_dim = max(8, 2c//reduction), 默认 8
+#     heads:      稀疏注意力头数, 默认 4
+#     norm_attn:  ReLU 后是否对注意力做归一化 (除以 sum)
+
+nc: 5
+scales:
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+scale: s
+
+backbone:
+  # ── RGB 流 (C2f, layers 0-3) ──
+  - [-1, 1, Conv, [64, 3, 2]]        # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]]       # 1-P2/4
+  - [-1, 3, C2f, [128, True]]        # 2
+  - [-1, 1, Conv, [256, 3, 2]]       # 3-P3/8
+
+  # ── IR 流 (C2f_Faster, layers 4-7) ──
+  - [-4, 1, Conv, [64, 3, 2]]        # 4
+  - [-1, 1, Conv, [128, 3, 2]]       # 5
+  - [-1, 3, C2f_Faster, [128, True]] # 6
+  - [-1, 1, Conv, [256, 3, 2]]       # 7
+
+  # ── P3 深融合: MPSFusion (稀疏注意力 + 1x1 Bottleneck 联合混合) ──
+  - [-3, 1, MPSFusion, [64, 8, 2, True]]   # 8
+
+  # ── stage 2 独立继续 ──
+  - [-4, 6, C2f, [256, True]]        # 9   RGB 继续
+  - [-1, 1, Conv, [512, 3, 2]]       # 10
+  - [-4, 6, C2f_Faster, [256, True]] # 11  IR 继续
+  - [-1, 1, Conv, [512, 3, 2]]       # 12
+
+  # ── P4 深融合: MPSFusion ──
+  - [-3, 1, MPSFusion, [128, 8, 4, True]]  # 13
+
+  # ── stage 3 独立继续 ──
+  - [-4, 6, C2f, [512, True]]        # 14  RGB 继续
+  - [-1, 1, Conv, [1024, 3, 2]]      # 15
+  - [-4, 6, C2f_Faster, [512, True]] # 16  IR 继续
+  - [-1, 1, Conv, [1024, 3, 2]]      # 17
+
+  # ── P5 深融合: MPSFusion ──
+  - [-3, 1, MPSFusion, [256, 8, 4, True]]  # 18
+
+  # ── stage 4 独立继续 ──
+  - [-4, 3, C2f, [1024, True]]       # 19  RGB 继续
+  - [-1, 1, SPPF, [1024, 5]]         # 20
+  - [-4, 3, C2f_Faster, [1024, True]]# 21  IR 继续
+  - [-1, 1, SPPF, [1024, 5]]         # 22
+
+  # ── P3/P4/P5 末端融合: ADD 简单相加 ──
+  - [[9, 11], 1, ADD, [1]]           # 23  P3
+  - [[14, 16], 1, ADD, [1]]          # 24  P4
+  - [[20, 22], 1, ADD, [1]]          # 25  P5
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 26
+  - [[-1, 24], 1, Concat, [1]]                    # 27
+  - [-1, 3, C2f, [512]]                           # 28
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 29
+  - [[-1, 23], 1, Concat, [1]]                    # 30
+  - [-1, 3, C2f, [256]]                           # 31
+  - [-1, 1, Conv, [256, 3, 2]]                    # 32
+  - [[-1, 28], 1, Concat, [1]]                    # 33
+  - [-1, 3, C2f, [512]]                           # 34
+  - [-1, 1, Conv, [512, 3, 2]]                    # 35
+  - [[-1, 25], 1, Concat, [1]]                    # 36
+  - [-1, 3, C2f, [1024]]                          # 37
+  - [[31, 34, 37], 1, OBB, [nc, 1]]               # 38

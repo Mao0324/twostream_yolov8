@@ -1,0 +1,99 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# YOLOv8 双流 OBB — MPSFusion (backbone 深融合) + MPSAdd (末端深融合)
+#
+# 架构说明:
+#   backbone 内部 3 个 stage (P3/P4/P5) 使用 MPSFusion:
+#     MPSFusion = 稀疏交叉注意力 + 1x1 Conv Bottleneck (输入/输出: [B,2C,H,W])
+#     - Step 1: SparseCrossChannelAttention2d —— "我需要你的哪些信息?" (选择性、稀疏)
+#     - Step 2: 1x1 Conv squeeze-expand ——   "让我们在通道维度直接交互" (稠密、直接)
+#
+#   backbone 末端 (P3/P4/P5) 使用 MPSAdd (取代 ADD/ASSAAdd):
+#     MPSAdd = 稀疏交叉注意力 + 1x1 Conv Bottleneck + 降维融合 (输入: 2×[B,C,H,W], 输出: [B,C,H,W])
+#     - Step 1: 稀疏注意力做跨模态选择性修正
+#     - Step 2: bottleneck 做稠密通道混合
+#     - Step 3: 1x1 Conv 降维 → 单路输出, 送入 FPN
+#
+#   全链路深融合: backbone 内部 MPSFusion → 末端 MPSAdd → FPN
+#   从 backbone P3 开始 RGB/IR 就在联合空间中被反复精炼, 直到 FPN 前最后一刻才规约为单路
+#
+# 对比基线:
+#   assarifusion.yaml:  ASSARIFusion(纯稀疏注意力) + ADD(简单相加)
+#   mpsfusion.yaml:     MPSFusion(attn+bottleneck)    + ADD(简单相加)
+#   本配置:              MPSFusion(attn+bottleneck)    + MPSAdd(attn+bottleneck+降维)
+#
+# 预期 mAP50 提升: 0.7~2.0% (相比 ASSARIFusion 基线)
+# 新增参数量:      约 +712K
+#   - 3 × MPSFusion bottleneck: ~344K
+#   - 3 × MPSAdd (bottleneck + fuse): ~368K
+#
+# MPSFusion 参数: [c, reduction, heads, norm_attn]
+# MPSAdd 参数:     [reduction, heads, norm_attn]  (c 由输入自动推断)
+
+nc: 5
+scales:
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+scale: s
+
+backbone:
+  # ── RGB 流 (C2f, layers 0-3) ──
+  - [-1, 1, Conv, [64, 3, 2]]        # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]]       # 1-P2/4
+  - [-1, 3, C2f, [128, True]]        # 2
+  - [-1, 1, Conv, [256, 3, 2]]       # 3-P3/8
+
+  # ── IR 流 (C2f_Faster, layers 4-7) ──
+  - [-4, 1, Conv, [64, 3, 2]]        # 4
+  - [-1, 1, Conv, [128, 3, 2]]       # 5
+  - [-1, 3, C2f_Faster, [128, True]] # 6
+  - [-1, 1, Conv, [256, 3, 2]]       # 7
+
+  # ── P3 深融合: MPSFusion (稀疏注意力 + 1x1 Bottleneck) ──
+  - [-3, 1, MPSFusion, [64, 8, 2, True]]   # 8
+
+  # ── stage 2 独立继续 ──
+  - [-4, 6, C2f, [256, True]]        # 9   RGB
+  - [-1, 1, Conv, [512, 3, 2]]       # 10
+  - [-4, 6, C2f_Faster, [256, True]] # 11  IR
+  - [-1, 1, Conv, [512, 3, 2]]       # 12
+
+  # ── P4 深融合: MPSFusion ──
+  - [-3, 1, MPSFusion, [128, 8, 4, True]]  # 13
+
+  # ── stage 3 独立继续 ──
+  - [-4, 6, C2f, [512, True]]        # 14  RGB
+  - [-1, 1, Conv, [1024, 3, 2]]      # 15
+  - [-4, 6, C2f_Faster, [512, True]] # 16  IR
+  - [-1, 1, Conv, [1024, 3, 2]]      # 17
+
+  # ── P5 深融合: MPSFusion ──
+  - [-3, 1, MPSFusion, [256, 8, 4, True]]  # 18
+
+  # ── stage 4 独立继续 ──
+  - [-4, 3, C2f, [1024, True]]       # 19  RGB
+  - [-1, 1, SPPF, [1024, 5]]         # 20
+  - [-4, 3, C2f_Faster, [1024, True]]# 21  IR
+  - [-1, 1, SPPF, [1024, 5]]         # 22
+
+  # ── P3/P4/P5 末端深融合: MPSAdd (稀疏注意力 + 1x1 Bottleneck + 降维) ──
+  - [[9, 11], 1, MPSAdd, [8, 2, True]]      # 23  P3  两流→单路
+  - [[14, 16], 1, MPSAdd, [8, 4, True]]     # 24  P4  两流→单路
+  - [[20, 22], 1, MPSAdd, [8, 4, True]]     # 25  P5  两流→单路
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 26
+  - [[-1, 24], 1, Concat, [1]]                    # 27
+  - [-1, 3, C2f, [512]]                           # 28
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 29
+  - [[-1, 23], 1, Concat, [1]]                    # 30
+  - [-1, 3, C2f, [256]]                           # 31
+  - [-1, 1, Conv, [256, 3, 2]]                    # 32
+  - [[-1, 28], 1, Concat, [1]]                    # 33
+  - [-1, 3, C2f, [512]]                           # 34
+  - [-1, 1, Conv, [512, 3, 2]]                    # 35
+  - [[-1, 25], 1, Concat, [1]]                    # 36
+  - [-1, 3, C2f, [1024]]                          # 37
+  - [[31, 34, 37], 1, OBB, [nc, 1]]               # 38

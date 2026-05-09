@@ -1728,6 +1728,127 @@ class ASSARIFusion(nn.Module):
         return torch.cat([rgb, ir], dim=1)
 
 
+class MPSFusion(nn.Module):
+    """Merge-Process-Split fusion: sparse cross-attention + 1x1 Conv bottleneck.
+
+    比 ASSARIFusion 多了第 2 步的 1x1 Conv bottleneck（稠密通道混合）,
+    让两个模态在通道维度上做直接的线性交互, 而不再只是通过稀疏注意力"轻触"。
+
+    Args:
+        c: 每个模态的通道数, 输入是 cat([rgb,ir]) 所以总通道=2c
+        reduction: bottleneck 压缩倍率, middle_dim = max(8, 2c//reduction)
+        heads: 稀疏交叉注意力的头数
+        norm_attn: 注意力是否归一化 (ReLU 后除以 sum)
+        init_scale: 控制两步残差的初始幅度, 训练初期保持极小以保留独立表征
+    Input:  [B, 2C, H, W] 拼接的 RGB+IR 特征
+    Output: [B, 2C, H, W] 融合后重新 split 再拼回
+    """
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        inner = max(8, 2 * c // reduction)
+
+        # ── Step 1: 稀疏交叉注意力 (保留 ASSARIFusion 的选择性修正) ──
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+
+        # ── Step 2: 1x1 Conv bottleneck 联合通道混合 (MPS 新增) ──
+        # squeeze → SiLU → expand, 让 RGB/IR 通道在低维空间直接交互
+        self.merge = nn.Sequential(
+            nn.Conv2d(2 * c, inner, 1, bias=False),
+            nn.BatchNorm2d(inner),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(inner, 2 * c, 1, bias=False),
+            nn.BatchNorm2d(2 * c),
+        )
+        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Step 1 让模态互相"理解", Step 2 在理解基础上做稠密通道混合."""
+        rgb, ir = torch.chunk(x, 2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"MPSFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        # Step 1: 稀疏交叉注意力 —— "我需要你的哪些信息?" (选择性、稀疏)
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_attn_rgb * delta_rgb
+        ir = ir + self.scale_attn_ir * delta_ir
+
+        # Step 2: 1x1 Conv bottleneck —— "让我们混在一起直接聊" (稠密、直接)
+        merged = torch.cat([rgb, ir], dim=1)          # [B, 2c, H, W]
+        merged = merged + self.scale_mps * self.merge(merged)  # 残差连接
+
+        rgb, ir = torch.chunk(merged, 2, dim=1)
+        return torch.cat([rgb, ir], dim=1)
+
+
+class MPSAdd(nn.Module):
+    """MPS-style terminal RGB/IR add fusion: sparse xattn + 1x1 bottleneck → single stream.
+
+    用于 backbone 末端的 P3/P4/P5 融合 (替代 ADD / ASSAAdd),
+    先做稀疏注意力 + bottleneck 联合处理, 再规约为单路特征送入 FPN。
+
+    Args:
+        c: 每个输入张量的通道数
+        reduction: bottleneck 压缩倍率
+        heads: 稀疏交叉注意力的头数
+        norm_attn: 注意力是否归一化
+        init_scale: 两步残差的初始幅度
+    Input:  list/tuple of two tensors, 每个 [B, C, H, W]
+    Output: single tensor [B, C, H, W]
+    """
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        inner = max(8, 2 * c // reduction)
+
+        # ── Step 1: 稀疏交叉注意力 ──
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+
+        # ── Step 2: 1x1 Conv bottleneck ──
+        self.merge = nn.Sequential(
+            nn.Conv2d(2 * c, inner, 1, bias=False),
+            nn.BatchNorm2d(inner),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(inner, 2 * c, 1, bias=False),
+            nn.BatchNorm2d(2 * c),
+        )
+        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale)
+
+        # 融合后降维到单路
+        self.fuse = nn.Sequential(
+            nn.Conv2d(2 * c, c, 1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x):
+        """Step 1→2 联合处理两个模态, 最后降维输出."""
+        if not isinstance(x, (list, tuple)) or len(x) != 2:
+            raise ValueError("MPSAdd expects a list or tuple of two tensors.")
+        rgb, ir = x
+        if rgb.shape != ir.shape:
+            raise ValueError(f"MPSAdd expects matching shapes, got {rgb.shape} and {ir.shape}.")
+
+        # Step 1: 稀疏交叉注意力
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_attn_rgb * delta_rgb
+        ir = ir + self.scale_attn_ir * delta_ir
+
+        # Step 2: 1x1 Conv bottleneck 联合混合
+        merged = torch.cat([rgb, ir], dim=1)
+        merged = merged + self.scale_mps * self.merge(merged)
+
+        return self.fuse(merged)
+
+
 class ASSARefine(nn.Module):
     """ASSA-style self refinement, input [B, C, H, W], output [B, C, H, W]."""
 
