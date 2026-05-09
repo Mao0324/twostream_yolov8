@@ -43,6 +43,7 @@ __all__ = (
     "SparseCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
+    "MPSFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1799,6 +1800,72 @@ class ASSARIFusion_v3(nn.Module):
         ir = ir + self.scale_ir * delta_ir * gate_ir
         out = torch.cat([rgb, ir], dim=1)
         return out + self.post_scale * self.post_dw(out)
+
+
+class MPSFusion(nn.Module):
+    """Merge-Process-Split: sparse cross-attention + 1x1 Conv squeeze-expand bottleneck.
+
+    Step 1 — Sparse cross-channel attention (ASSARIFusion's core):
+        Each modality selectively queries the other in channel space, producing
+        a sparse correction delta.  This is the "I need your information" step.
+
+    Step 2 — 1×1 Conv bottleneck (joint channel mixing):
+        After attention-based correction, the two modalities are concatenated,
+        squeezed through a bottleneck, then expanded back.  A 1×1 Conv sees all
+        input channels (RGB + IR) simultaneously, enabling dense linear mixing
+        that attention alone cannot provide.  A residual connection ensures
+        stability: out = merged + scale * bottleneck(merged).
+
+    The two steps are complementary, not redundant:
+        attention = soft, selective routing
+        1×1 Conv  = direct, dense channel mixing
+
+    Args:
+        c: channels per stream (total input = 2*c)
+        reduction: bottleneck reduction ratio for attention and conv
+        heads: number of attention heads
+        norm_attn: whether to L1-normalize attention weights
+        init_scale: initial value for learnable scale parameters
+    """
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        inner = max(8, 2 * c // reduction)
+
+        # Step 1: sparse cross-channel attention (保留 ASSARIFusion 精华)
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+
+        # Step 2: 1×1 Conv squeeze-expand bottleneck (直接跨模态通道混合)
+        self.merge = nn.Sequential(
+            nn.Conv2d(2 * c, inner, 1, bias=False),
+            nn.BatchNorm2d(inner),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(inner, 2 * c, 1, bias=False),
+            nn.BatchNorm2d(2 * c),
+        )
+        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse concatenated RGB/IR features with attention correction + joint mixing."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"MPSFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        # Step 1: 稀疏交叉注意力 — 跨模态选择性修正
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_attn_rgb * delta_rgb
+        ir = ir + self.scale_attn_ir * delta_ir
+
+        # Step 2: 1×1 Conv bottleneck — 直接跨模态通道交互
+        merged = torch.cat([rgb, ir], dim=1)
+        merged = merged + self.scale_mps * self.merge(merged)
+
+        rgb, ir = torch.chunk(merged, 2, dim=1)
+        return torch.cat([rgb, ir], dim=1)
 
 
 class ASSARefine(nn.Module):
