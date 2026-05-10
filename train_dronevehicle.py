@@ -14,7 +14,7 @@ results = model.train(
     batch=128,
     epochs=100,
     imgsz=640,
-    device='0,1,2,3,4,5,6,7',
-    project='dronevehicle_runs_mpsfusion',
+    device='3,4,5,6',
+    project='dronevehicle_runs_mpsfusion_fix',
     task='obb'
 )
