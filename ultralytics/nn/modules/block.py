@@ -1635,10 +1635,42 @@ class LayerNorm2d(nn.Module):
         return x * self.weight[:, None, None] + self.bias[:, None, None]
 
 
+def _entmax15(z, dim=-1, n_iter=30):
+    """Entmax15 (alpha=1.5) sparse activation: p ∝ (z - τ)_+^2."""
+    z_max = z.max(dim=dim, keepdim=True).values
+    z_min = z.min(dim=dim, keepdim=True).values
+    tau_min = z_min - 1.0
+    tau_max = z_max
+    for _ in range(n_iter):
+        tau = (tau_min + tau_max) * 0.5
+        support = (z > tau).float()
+        s = ((z - tau).clamp(min=0) ** 2).sum(dim=dim, keepdim=True)
+        tau_min = torch.where(s > 1.0, tau, tau_min)
+        tau_max = torch.where(s <= 1.0, tau, tau_max)
+    tau = (tau_min + tau_max) * 0.5
+    p = (z - tau).clamp(min=0) ** 2
+    return p / (p.sum(dim=dim, keepdim=True) + 1e-8)
+
+
+def _sparsemax(z, dim=-1):
+    """Sparsemax (entmax with alpha=2): closed-form sparse activation."""
+    z_sorted, idx = z.sort(dim=dim, descending=True)
+    cumsum = z_sorted.cumsum(dim)
+    k = torch.arange(1, z.shape[dim] + 1, device=z.device, dtype=z.dtype)
+    for _ in range(len(z.shape) - 1):
+        k = k.unsqueeze(0)
+    k = k.expand_as(z_sorted)
+    support = (1.0 + k * z_sorted > cumsum).float()
+    k_z = support.sum(dim=dim, keepdim=True).clamp(min=1)
+    tau = (cumsum.gather(dim, (k_z.long() - 1).clamp(min=0)) - 1.0) / k_z
+    p = (z - tau).clamp(min=0)
+    return p / (p.sum(dim=dim, keepdim=True) + 1e-8)
+
+
 class SparseCrossChannelAttention2d(nn.Module):
     """Sparse transposed channel attention from ref to src, both [B, C, H, W]."""
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3, activation="relu"):
         super().__init__()
         hidden = max(8, c // reduction)
         heads = max(1, min(int(heads), hidden))
@@ -1650,6 +1682,7 @@ class SparseCrossChannelAttention2d(nn.Module):
         self.heads = heads
         self.dim = hidden // heads
         self.norm_attn = norm_attn
+        self.activation = activation
         self.last_sparsity = None
 
         self.norm_src = LayerNorm2d(c)
@@ -1660,6 +1693,19 @@ class SparseCrossChannelAttention2d(nn.Module):
         self.kv_dw = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
         self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
         self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+
+    def _apply_activation(self, attn):
+        if self.activation == "entmax15":
+            return _entmax15(attn, dim=-1)
+        elif self.activation == "sparsemax":
+            return _sparsemax(attn, dim=-1)
+        elif self.activation == "softmax":
+            return F.softmax(attn, dim=-1)
+        else:  # "relu"
+            attn = F.relu(attn)
+            if self.norm_attn:
+                attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+            return attn
 
     def forward(self, src, ref):
         """Return attention delta with shape [B, C, H, W]."""
@@ -1676,9 +1722,7 @@ class SparseCrossChannelAttention2d(nn.Module):
         k = F.normalize(k, dim=-1)
 
         attn = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
-        attn = F.relu(attn)
-        if self.norm_attn:
-            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+        attn = self._apply_activation(attn)
         self.last_sparsity = (attn <= 1e-6).float().mean().detach()
 
         out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
@@ -1688,10 +1732,28 @@ class SparseCrossChannelAttention2d(nn.Module):
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True,
+                 activation="relu", use_gate=False, dynamic_scale=False, init_scale=1e-3):
         super().__init__()
-        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.c = c
+        self.use_gate = use_gate
+        self.dynamic_scale = dynamic_scale
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale, activation)
         self.scale = nn.Parameter(torch.ones(1) * init_scale)
+        if use_gate:
+            self.gate_conv = nn.Sequential(
+                nn.Conv2d(c * 3, c, 3, padding=1, bias=False),
+                nn.BatchNorm2d(c),
+                nn.Sigmoid(),
+            )
+        if dynamic_scale:
+            self.dyn_scale_pool = nn.AdaptiveAvgPool2d(1)
+            self.dyn_scale_conv = nn.Sequential(
+                nn.Conv2d(c * 2, c, 1, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c, 1, 1, bias=False),
+                nn.Sigmoid(),
+            )
 
     def forward(self, x):
         """Fuse two same-shaped feature tensors."""
@@ -1703,18 +1765,48 @@ class ASSAAdd(nn.Module):
         base = rgb_feat + ir_feat
         delta_rgb = self.xattn(rgb_feat, ir_feat)
         delta_ir = self.xattn(ir_feat, rgb_feat)
-        return base + self.scale * 0.5 * (delta_rgb + delta_ir)
+        delta = 0.5 * (delta_rgb + delta_ir)
+
+        if self.dynamic_scale:
+            pooled = self.dyn_scale_pool(torch.cat([rgb_feat, ir_feat], dim=1))
+            dyn_scale = self.dyn_scale_conv(pooled)  # [B, 1, 1, 1]
+            scale = self.scale * dyn_scale
+        else:
+            scale = self.scale
+
+        if self.use_gate:
+            interaction = torch.cat([rgb_feat, ir_feat, rgb_feat * ir_feat], dim=1)
+            gate = self.gate_conv(interaction)
+            return base + gate * scale * delta
+        return base + scale * delta
 
 
 class ASSARIFusion(nn.Module):
     """ASSA-style intermediate RGB/IR fusion, input [B, 2C, H, W], output [B, 2C, H, W]."""
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True,
+                 activation="relu", use_gate=False, dynamic_scale=False, init_scale=1e-3):
         super().__init__()
         self.c = c
-        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.use_gate = use_gate
+        self.dynamic_scale = dynamic_scale
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale, activation)
         self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
         self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+        if use_gate:
+            self.gate_conv = nn.Sequential(
+                nn.Conv2d(c * 3, c, 3, padding=1, bias=False),
+                nn.BatchNorm2d(c),
+                nn.Sigmoid(),
+            )
+        if dynamic_scale:
+            self.dyn_scale_pool = nn.AdaptiveAvgPool2d(1)
+            self.dyn_scale_conv = nn.Sequential(
+                nn.Conv2d(c * 2, c, 1, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c, 2, 1, bias=False),
+                nn.Sigmoid(),
+            )
 
     def forward(self, x):
         """Fuse concatenated RGB/IR feature tensor."""
@@ -1723,17 +1815,34 @@ class ASSARIFusion(nn.Module):
             raise ValueError(f"ASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
         delta_rgb = self.xattn(rgb, ir)
         delta_ir = self.xattn(ir, rgb)
-        rgb = rgb + self.scale_rgb * delta_rgb
-        ir = ir + self.scale_ir * delta_ir
+
+        if self.dynamic_scale:
+            pooled = self.dyn_scale_pool(x)
+            scales = self.dyn_scale_conv(pooled)  # [B, 2, 1, 1]
+            s_rgb = self.scale_rgb + scales[:, 0:1]
+            s_ir = self.scale_ir + scales[:, 1:2]
+        else:
+            s_rgb = self.scale_rgb
+            s_ir = self.scale_ir
+
+        if self.use_gate:
+            interaction = torch.cat([rgb, ir, rgb * ir], dim=1)
+            gate = self.gate_conv(interaction)
+            rgb = rgb + gate * s_rgb * delta_rgb
+            ir = ir + gate * s_ir * delta_ir
+        else:
+            rgb = rgb + s_rgb * delta_rgb
+            ir = ir + s_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)
 
 
 class ASSARefine(nn.Module):
     """ASSA-style self refinement, input [B, C, H, W], output [B, C, H, W]."""
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True,
+                 activation="relu", init_scale=1e-3):
         super().__init__()
-        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale, activation)
         self.scale = nn.Parameter(torch.ones(1) * init_scale)
 
     def forward(self, x):
