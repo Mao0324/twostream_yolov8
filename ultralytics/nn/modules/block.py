@@ -1734,17 +1734,24 @@ class MPSFusion(nn.Module):
     比 ASSARIFusion 多了第 2 步的 1x1 Conv bottleneck（稠密通道混合）,
     让两个模态在通道维度上做直接的线性交互, 而不再只是通过稀疏注意力"轻触"。
 
+    V2 修复 (vs idea.txt 初版):
+      - 去掉 bottleneck 末尾的 BN: BN 归一化输出为 N(0,1) 后乘以 1e-3 scale
+        导致瓶颈梯度路径完全死掉; 移除后 Conv2d 输出量级自然, 由 scale_mps 控制
+      - scale_mps 独立参数, 默认 1e-2 (vs 原来的 1e-3), 给出 10 倍更大的初始信号
+      - bottleneck 中间保留 BN 以保证 squeeze 后的激活分布稳定
+
     Args:
         c: 每个模态的通道数, 输入是 cat([rgb,ir]) 所以总通道=2c
-        reduction: bottleneck 压缩倍率, middle_dim = max(8, 2c//reduction)
+        reduction: bottleneck 压缩倍率和注意力压缩倍率, middle_dim = max(8, 2c//reduction)
         heads: 稀疏交叉注意力的头数
-        norm_attn: 注意力是否归一化 (ReLU 后除以 sum)
-        init_scale: 控制两步残差的初始幅度, 训练初期保持极小以保留独立表征
+        norm_attn: 注意力 ReLU 后是否归一化 (除以 sum)
+        init_scale: 注意力残差的初始幅度 (默认 1e-3, 与 ASSARIFusion 一致)
+        init_scale_mps: 瓶颈残差的初始幅度 (默认 1e-2, 比注意力大 10 倍)
     Input:  [B, 2C, H, W] 拼接的 RGB+IR 特征
     Output: [B, 2C, H, W] 融合后重新 split 再拼回
     """
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3, init_scale_mps=1e-2):
         super().__init__()
         self.c = c
         inner = max(8, 2 * c // reduction)
@@ -1756,14 +1763,15 @@ class MPSFusion(nn.Module):
 
         # ── Step 2: 1x1 Conv bottleneck 联合通道混合 (MPS 新增) ──
         # squeeze → SiLU → expand, 让 RGB/IR 通道在低维空间直接交互
+        # 注意: 末尾无 BN —— BN 会强制输出为 N(0,1), 配上 1e-3 scale 导致
+        # bottleneck 的梯度被 BN 噪声淹没, 学不到有用信号
         self.merge = nn.Sequential(
             nn.Conv2d(2 * c, inner, 1, bias=False),
             nn.BatchNorm2d(inner),
             nn.SiLU(inplace=True),
             nn.Conv2d(inner, 2 * c, 1, bias=False),
-            nn.BatchNorm2d(2 * c),
         )
-        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale_mps)
 
     def forward(self, x):
         """Step 1 让模态互相"理解", Step 2 在理解基础上做稠密通道混合."""
@@ -1791,17 +1799,22 @@ class MPSAdd(nn.Module):
     用于 backbone 末端的 P3/P4/P5 融合 (替代 ADD / ASSAAdd),
     先做稀疏注意力 + bottleneck 联合处理, 再规约为单路特征送入 FPN。
 
+    V2 修复 (同 MPSFusion):
+      - 去掉 bottleneck 末尾 BN
+      - scale_mps 独立参数, 默认 1e-2
+
     Args:
         c: 每个输入张量的通道数
         reduction: bottleneck 压缩倍率
         heads: 稀疏交叉注意力的头数
         norm_attn: 注意力是否归一化
-        init_scale: 两步残差的初始幅度
+        init_scale: 注意力残差的初始幅度
+        init_scale_mps: 瓶颈残差的初始幅度 (默认 1e-2)
     Input:  list/tuple of two tensors, 每个 [B, C, H, W]
     Output: single tensor [B, C, H, W]
     """
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3, init_scale_mps=1e-2):
         super().__init__()
         self.c = c
         inner = max(8, 2 * c // reduction)
@@ -1811,15 +1824,14 @@ class MPSAdd(nn.Module):
         self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
         self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
 
-        # ── Step 2: 1x1 Conv bottleneck ──
+        # ── Step 2: 1x1 Conv bottleneck (无末尾 BN) ──
         self.merge = nn.Sequential(
             nn.Conv2d(2 * c, inner, 1, bias=False),
             nn.BatchNorm2d(inner),
             nn.SiLU(inplace=True),
             nn.Conv2d(inner, 2 * c, 1, bias=False),
-            nn.BatchNorm2d(2 * c),
         )
-        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale_mps)
 
         # 融合后降维到单路
         self.fuse = nn.Sequential(
