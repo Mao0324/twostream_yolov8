@@ -1,30 +1,31 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-# YOLOv8 双流 OBB — MPSFusion (backbone 深融合) + MPSAdd (末端深融合)
+# YOLOv8 双流 OBB — MPSFusion V2 (backbone 深融合) + MPSAdd V2 (末端深融合)
+#
+# V2 修复说明: 末尾 BN 移除 + scale_mps init 1e-2, 详见 mpsfusion.yaml 头部注释。
 #
 # 架构说明:
-#   backbone 内部 3 个 stage (P3/P4/P5) 使用 MPSFusion:
+#   backbone 内部 3 个 stage (P3/P4/P5) 使用 MPSFusion V2:
 #     MPSFusion = 稀疏交叉注意力 + 1x1 Conv Bottleneck (输入/输出: [B,2C,H,W])
-#     - Step 1: SparseCrossChannelAttention2d —— "我需要你的哪些信息?" (选择性、稀疏)
-#     - Step 2: 1x1 Conv squeeze-expand ——   "让我们在通道维度直接交互" (稠密、直接)
+#     - Step 1: SparseCrossChannelAttention2d (LayerNorm, batch 无关) —— 选择性修正
+#     - Step 2: 1x1 Conv squeeze-BN-SiLU-expand (无末尾 BN) —— 稠密通道混合
 #
-#   backbone 末端 (P3/P4/P5) 使用 MPSAdd (取代 ADD/ASSAAdd):
-#     MPSAdd = 稀疏交叉注意力 + 1x1 Conv Bottleneck + 降维融合 (输入: 2×[B,C,H,W], 输出: [B,C,H,W])
-#     - Step 1: 稀疏注意力做跨模态选择性修正
-#     - Step 2: bottleneck 做稠密通道混合
-#     - Step 3: 1x1 Conv 降维 → 单路输出, 送入 FPN
+#   backbone 末端 (P3/P4/P5) 使用 MPSAdd V2 (取代 ADD/ASSAAdd):
+#     MPSAdd = Step1 注意力 + Step2 bottleneck + Step3 降维融合
+#     (输入: 2×[B,C,H,W], 输出: [B,C,H,W])
 #
 #   全链路深融合: backbone 内部 MPSFusion → 末端 MPSAdd → FPN
 #   从 backbone P3 开始 RGB/IR 就在联合空间中被反复精炼, 直到 FPN 前最后一刻才规约为单路
 #
 # 对比基线:
-#   assarifusion.yaml:  ASSARIFusion(纯稀疏注意力) + ADD(简单相加)
-#   mpsfusion.yaml:     MPSFusion(attn+bottleneck)    + ADD(简单相加)
-#   本配置:              MPSFusion(attn+bottleneck)    + MPSAdd(attn+bottleneck+降维)
+#   assarifusion.yaml:  ASSARIFusion + ADD
+#   assafusion.yaml:    ASSARIFusion + ASSAAdd
+#   mpsfusion.yaml:     MPSFusion V2  + ADD
+#   本配置:              MPSFusion V2  + MPSAdd V2  (最大融合强度)
 #
-# 预期 mAP50 提升: 0.7~2.0% (相比 ASSARIFusion 基线)
-# 新增参数量:      约 +712K
-#   - 3 × MPSFusion bottleneck: ~344K
-#   - 3 × MPSAdd (bottleneck + fuse): ~368K
+# 预期 mAP50: 应超过 mpsfusion.yaml 和 assafusion.yaml
+# 新增参数量 (相比 ASSARIFusion): ~491K
+#   - 3 × MPSFusion Conv 权重: ~86K
+#   - 3 × MPSAdd (merge + fuse): ~405K
 #
 # MPSFusion 参数: [c, reduction, heads, norm_attn]
 # MPSAdd 参数:     [reduction, heads, norm_attn]  (c 由输入自动推断)
