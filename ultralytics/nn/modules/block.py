@@ -1729,111 +1729,109 @@ class ASSARIFusion(nn.Module):
 
 
 class MPSFusion(nn.Module):
-    """Merge-Process-Split fusion: sparse cross-attention + 1x1 Conv bottleneck.
+    """Merge-Process-Split fusion: 1x1 Conv bottleneck → sparse cross-attention.
 
-    比 ASSARIFusion 多了第 2 步的 1x1 Conv bottleneck（稠密通道混合）,
-    让两个模态在通道维度上做直接的线性交互, 而不再只是通过稀疏注意力"轻触"。
+    V3 修复 (相比 V2):
+      - 交换顺序: bottleneck 在前 (粗粒度联合表征), attention 在后 (细粒度选择性修正)
+        V2 顺序 attention→bottleneck 存在冲突: attention 做选择性过滤后再被
+        bottleneck 的稠密混合"洗平", 尤其伤害困难类别 (van -2.4 点)
+      - 扩大 bottleneck 宽度: bottleneck_reduction 独立于 attention reduction,
+        默认 4 (2c/4 = c/2), 比原来 8 (c/4) 宽一倍
+      - scale_mps 改回 1e-3: 与 attention 平级, 不主导
 
-    V2 修复 (vs idea.txt 初版):
-      - 去掉 bottleneck 末尾的 BN: BN 归一化输出为 N(0,1) 后乘以 1e-3 scale
-        导致瓶颈梯度路径完全死掉; 移除后 Conv2d 输出量级自然, 由 scale_mps 控制
-      - scale_mps 独立参数, 默认 1e-2 (vs 原来的 1e-3), 给出 10 倍更大的初始信号
-      - bottleneck 中间保留 BN 以保证 squeeze 后的激活分布稳定
+    设计直觉:
+      bottleneck: "让我们先摆在一起看看"  — 稠密全通道混合 (宽, 粗)
+      attention:   "我需要你的哪些信息?"  — 稀疏选择性修正 (窄, 精)
+      顺序: 粗→精 = 兼容; 精→粗 = 冲突 (稠密混合会冲淡精细选择)
 
     Args:
         c: 每个模态的通道数, 输入是 cat([rgb,ir]) 所以总通道=2c
-        reduction: bottleneck 压缩倍率和注意力压缩倍率, middle_dim = max(8, 2c//reduction)
+        reduction:           注意力压缩倍率, xattn_hidden = max(8, c//reduction)
+        bottleneck_reduction: 瓶颈压缩倍率, inner = max(8, 2c//bottleneck_reduction)
         heads: 稀疏交叉注意力的头数
-        norm_attn: 注意力 ReLU 后是否归一化 (除以 sum)
-        init_scale: 注意力残差的初始幅度 (默认 1e-3, 与 ASSARIFusion 一致)
-        init_scale_mps: 瓶颈残差的初始幅度 (默认 1e-2, 比注意力大 10 倍)
+        norm_attn: 注意力 ReLU 后是否归一化
+        init_scale:     注意力/瓶颈残差的初始幅度 (默认 1e-3)
     Input:  [B, 2C, H, W] 拼接的 RGB+IR 特征
     Output: [B, 2C, H, W] 融合后重新 split 再拼回
     """
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3, init_scale_mps=1e-2):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3,
+                 bottleneck_reduction=4):
         super().__init__()
         self.c = c
-        inner = max(8, 2 * c // reduction)
+        inner = max(8, 2 * c // bottleneck_reduction)
 
-        # ── Step 1: 稀疏交叉注意力 (保留 ASSARIFusion 的选择性修正) ──
-        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
-        self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
-        self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
-
-        # ── Step 2: 1x1 Conv bottleneck 联合通道混合 (MPS 新增) ──
-        # squeeze → SiLU → expand, 让 RGB/IR 通道在低维空间直接交互
-        # 注意: 末尾无 BN —— BN 会强制输出为 N(0,1), 配上 1e-3 scale 导致
-        # bottleneck 的梯度被 BN 噪声淹没, 学不到有用信号
+        # ── Step 1: 1x1 Conv bottleneck — 粗粒度联合表征 (先稠密混合) ──
         self.merge = nn.Sequential(
             nn.Conv2d(2 * c, inner, 1, bias=False),
             nn.BatchNorm2d(inner),
             nn.SiLU(inplace=True),
             nn.Conv2d(inner, 2 * c, 1, bias=False),
         )
-        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale_mps)
+        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale)
+
+        # ── Step 2: 稀疏交叉注意力 — 细粒度选择性修正 ──
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
 
     def forward(self, x):
-        """Step 1 让模态互相"理解", Step 2 在理解基础上做稠密通道混合."""
+        """Step 1 粗粒度联合 → Step 2 细粒度选择性修正."""
         rgb, ir = torch.chunk(x, 2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"MPSFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
 
-        # Step 1: 稀疏交叉注意力 —— "我需要你的哪些信息?" (选择性、稀疏)
+        # Step 1: 1x1 Conv bottleneck —— "先摆在一起" (稠密、粗粒度)
+        merged = torch.cat([rgb, ir], dim=1)          # [B, 2c, H, W]
+        merged = merged + self.scale_mps * self.merge(merged)  # 残差连接
+        rgb, ir = torch.chunk(merged, 2, dim=1)
+
+        # Step 2: 稀疏交叉注意力 —— "再选择性修正" (稀疏、精细)
         delta_rgb = self.xattn(rgb, ir)
         delta_ir = self.xattn(ir, rgb)
         rgb = rgb + self.scale_attn_rgb * delta_rgb
         ir = ir + self.scale_attn_ir * delta_ir
 
-        # Step 2: 1x1 Conv bottleneck —— "让我们混在一起直接聊" (稠密、直接)
-        merged = torch.cat([rgb, ir], dim=1)          # [B, 2c, H, W]
-        merged = merged + self.scale_mps * self.merge(merged)  # 残差连接
-
-        rgb, ir = torch.chunk(merged, 2, dim=1)
         return torch.cat([rgb, ir], dim=1)
 
 
 class MPSAdd(nn.Module):
-    """MPS-style terminal RGB/IR add fusion: sparse xattn + 1x1 bottleneck → single stream.
+    """MPS-style terminal RGB/IR add fusion: 1x1 bottleneck → sparse xattn → single stream.
 
-    用于 backbone 末端的 P3/P4/P5 融合 (替代 ADD / ASSAAdd),
-    先做稀疏注意力 + bottleneck 联合处理, 再规约为单路特征送入 FPN。
-
-    V2 修复 (同 MPSFusion):
-      - 去掉 bottleneck 末尾 BN
-      - scale_mps 独立参数, 默认 1e-2
+    V3 修复: 与 MPSFusion 一致 — bottleneck 在前, attention 在后。
 
     Args:
         c: 每个输入张量的通道数
-        reduction: bottleneck 压缩倍率
+        reduction:           注意力压缩倍率
+        bottleneck_reduction: 瓶颈压缩倍率 (默认 4)
         heads: 稀疏交叉注意力的头数
         norm_attn: 注意力是否归一化
-        init_scale: 注意力残差的初始幅度
-        init_scale_mps: 瓶颈残差的初始幅度 (默认 1e-2)
+        init_scale: 残差的初始幅度
     Input:  list/tuple of two tensors, 每个 [B, C, H, W]
     Output: single tensor [B, C, H, W]
     """
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3, init_scale_mps=1e-2):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3,
+                 bottleneck_reduction=4):
         super().__init__()
         self.c = c
-        inner = max(8, 2 * c // reduction)
+        inner = max(8, 2 * c // bottleneck_reduction)
 
-        # ── Step 1: 稀疏交叉注意力 ──
-        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
-        self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
-        self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
-
-        # ── Step 2: 1x1 Conv bottleneck (无末尾 BN) ──
+        # ── Step 1: 1x1 Conv bottleneck — 粗粒度联合表征 ──
         self.merge = nn.Sequential(
             nn.Conv2d(2 * c, inner, 1, bias=False),
             nn.BatchNorm2d(inner),
             nn.SiLU(inplace=True),
             nn.Conv2d(inner, 2 * c, 1, bias=False),
         )
-        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale_mps)
+        self.scale_mps = nn.Parameter(torch.ones(1) * init_scale)
 
-        # 融合后降维到单路
+        # ── Step 2: 稀疏交叉注意力 — 细粒度选择性修正 ──
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_attn_rgb = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+        self.scale_attn_ir = nn.Parameter(torch.ones(c, 1, 1) * init_scale)
+
+        # ── 融合后降维到单路 ──
         self.fuse = nn.Sequential(
             nn.Conv2d(2 * c, c, 1, bias=False),
             nn.BatchNorm2d(c),
@@ -1841,23 +1839,26 @@ class MPSAdd(nn.Module):
         )
 
     def forward(self, x):
-        """Step 1→2 联合处理两个模态, 最后降维输出."""
+        """Step 1 粗粒度 → Step 2 细粒度 → 降维."""
         if not isinstance(x, (list, tuple)) or len(x) != 2:
             raise ValueError("MPSAdd expects a list or tuple of two tensors.")
         rgb, ir = x
         if rgb.shape != ir.shape:
             raise ValueError(f"MPSAdd expects matching shapes, got {rgb.shape} and {ir.shape}.")
 
-        # Step 1: 稀疏交叉注意力
+        # Step 1: 1x1 Conv bottleneck — 粗粒度联合
+        merged = torch.cat([rgb, ir], dim=1)
+        merged = merged + self.scale_mps * self.merge(merged)
+        rgb, ir = torch.chunk(merged, 2, dim=1)
+
+        # Step 2: 稀疏交叉注意力 — 细粒度修正
         delta_rgb = self.xattn(rgb, ir)
         delta_ir = self.xattn(ir, rgb)
         rgb = rgb + self.scale_attn_rgb * delta_rgb
         ir = ir + self.scale_attn_ir * delta_ir
 
-        # Step 2: 1x1 Conv bottleneck 联合混合
+        # Step 3: 降维融合 → 单路输出
         merged = torch.cat([rgb, ir], dim=1)
-        merged = merged + self.scale_mps * self.merge(merged)
-
         return self.fuse(merged)
 
 

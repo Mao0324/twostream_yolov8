@@ -1,41 +1,40 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-# YOLOv8 双流 OBB — MPSFusion V2 (backbone 深融合) + ADD (末端简单融合)
+# YOLOv8 双流 OBB — MPSFusion V3 (backbone 深融合) + ADD (末端简单融合)
 #
-# V2 修复说明 (相比 idea.txt 初版):
-#   初版 MPSFusion 训练效果反而比 ASSARIFusion 差, 根因有三:
-#   1) bottleneck 末尾的 BatchNorm2d 将输出强制归一化为 N(0,1), 再乘以 1e-3 scale,
-#      导致 bottleneck 梯度路径完全被 BN 噪声淹没 —— 学不到有用信号
-#   2) scale_mps 与 attention 共用同一个 init_scale=1e-3, bottleneck 信号过弱
-#   3) 对比 ASSARIFusion 能生效: 它的 xattn 内部用 LayerNorm (不依赖 batch),
-#      梯度干净稳定; 而 bottleneck 的 BN 依赖 batch 统计量, 小 batch 下极不稳定
-#   V2 修复: 去末尾 BN + scale_mps 独立参数 init 1e-2 (比 attention 大 10 倍)
+# V3 修复说明 (V2 仍比 ASSARIFusion 差 0.7 mAP50, 重新分析根因):
+#   V2 问题不在 BN 末尾归一化——去掉 BN + scale_mps=1e-2 后仍然差。
+#   真正的问题是 signal-processing order 冲突:
+#     attention(精, 选择性) → bottleneck(粗, 稠密混合)
+#     注意力先做"我只取需要的"选择性过滤, bottleneck 接着做全通道稠密混合,
+#     等于把注意力精心筛选的结果重新洗平 —— especially hurts hard classes (van -2.4)
+#   V3 修复:
+#     1) 交换顺序: bottleneck(粗) → attention(精)
+#        "先摆在一起形成联合表征, 再做选择性微调" — 粗→精 互补而非冲突
+#     2) 独立 bottleneck_reduction 参数, 默认 4 (2c/4=c/2), 比原来 8 (c/4) 宽一倍
+#     3) bottleneck 与 attention 同级 init_scale=1e-3, 不主导初始训练
 #
 # 架构说明:
-#   backbone 内部 3 个 stage (P3/P4/P5) 使用 MPSFusion 替换 ASSARIFusion:
-#     MPSFusion = 稀疏交叉注意力 + 1x1 Conv Bottleneck
-#     - Step 1: SparseCrossChannelAttention2d —— "我需要你的哪些信息?" (选择性、稀疏)
-#                内部使用 LayerNorm, 不依赖 batch, 梯度稳定
-#     - Step 2: 1x1 Conv squeeze-BN-SiLU-expand —— "让我们在通道维度直接交互" (稠密、直接)
-#                squeeze 后保留 BN 保证中间激活分布稳定; expand 后无 BN,
-#                Conv2d 输出量级自然, 由独立的 scale_mps 参数控制 (初始 1e-2)
-#     两步串行: 注意力先做选择性信息检索 → bottleneck 再做直接通道混合
+#   backbone 内部 3 个 stage (P3/P4/P5) 使用 MPSFusion V3 替换 ASSARIFusion:
+#     MPSFusion V3 = Step1(1x1 Conv bottleneck 稠密联合) → Step2(稀疏注意力 选择性修正)
+#     - Step 1: Conv(2c→c/2)→BN→SiLU→Conv(c/2→2c)  无末尾 BN
+#       "先摆在一起" — RGB/IR 通道在低维空间做直接线性混合, 形成粗粒度联合表征
+#     - Step 2: SparseCrossChannelAttention2d, 内部 LayerNorm
+#       "再选择性修正" — 在联合表征基础上做稀疏、精细的通道注意力微调
+#     顺序: 粗→精 互补; 旧顺序 精→粗 冲突 (稠密混合冲淡精细选择)
 #   backbone 末端 (P3/P4/P5) 使用 ADD 简单相加合并两流 → FPN
 #
 # 对比基线:
 #   assarifusion.yaml:  ASSARIFusion(纯稀疏注意力)              + ADD
-#   assafusion.yaml:    ASSARIFusion(纯稀疏注意力)              + ASSAAdd
-#   PC2f_MPF_yolov8s:   RIFusion(无融合 no-op)                 + ADD  (最简两流基线)
-#   本配置:              MPSFusion V2(注意力 + bottleneck)      + ADD
-#   预期 mAP50: 应超过 assarifusion 和 assafusion (V1 反超基线的 bug 已修)
-#   新增参数量:  ~86K (3×bottleneck Conv 权重, 不含 BN, 相比 ASSARIFusion)
+#   assafusion.yaml:    ASSARIFusion(纯稀疏注意力)              + ASSAAdd (当前最优)
+#   PC2f_MPF_yolov8s:   RIFusion(无融合 no-op)                 + ADD
+#   本配置:              MPSFusion V3(bottleneck粗→attention精) + ADD
 #
-# MPSFusion 参数说明:
-#   [c, reduction, heads, norm_attn]
-#     c:          每个模态的通道数 (自动推断)
-#     reduction:  压缩倍率, xattn hidden = c//reduction, bottleneck inner = 2c//reduction
-#                 默认 8, 越小越宽 (bottleneck 容量越大)
-#     heads:      稀疏注意力头数
-#     norm_attn:  ReLU 后是否对注意力做归一化 (除以 sum)
+# MPSFusion 参数: [c, reduction, heads, norm_attn]
+#   c:                    每个模态通道数 (自动推断)
+#   reduction:            注意力压缩倍率, xattn_hidden = c//reduction (默认 8)
+#   heads:                注意力头数
+#   norm_attn:            ReLU 后注意力的归一化
+#   bottleneck_reduction: 瓶颈压缩倍率, inner = 2c//bottleneck_reduction (默认 4)
 
 nc: 5
 scales:
