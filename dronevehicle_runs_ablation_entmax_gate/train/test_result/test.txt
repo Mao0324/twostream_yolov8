@@ -1,0 +1,30 @@
+(spikeyolo) biiteam@biiteam-SYS-4028GR-TR:~/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2$ python test_dronevehicle.py --weights /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs_assafusion/train2/weights/best.pt --project /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs_assafusion/train2  --name test_result
+Ultralytics YOLOv8.1.47 🚀 Python-3.9.0 torch-2.0.0+cu117 CUDA:0 (NVIDIA GeForce RTX 3090, 24133MiB)
+YOLOv8_twostream_obb_ablation_full summary (fused): 350 layers, 24970881 parameters, 0 gradients, 55.0 GFLOPs
+val: Scanning /home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/labels/test.cache... 8980 images, 18 backgrounds, 0 corrupt: 100%|██████████| 8980/8980 [00:00<?, ?it/s]
+                 Class     Images  Instances      Box(P          R      mAP50  mAP50-95): 100%|██████████| 562/562 [02:18<00:00,  4.05it/s]
+                   all       8980     159616       0.78      0.782      0.808       0.66
+                   car       8980     137148      0.945      0.967      0.985      0.834
+                 truck       8980       8657      0.764      0.781      0.809      0.632
+                   bus       8980       4467      0.909      0.937      0.963      0.804
+                   van       8980       4282      0.665      0.545      0.613      0.501
+           freight_car       8980       5062      0.618      0.682      0.669      0.529
+Speed: 0.3ms preprocess, 5.7ms inference, 0.0ms loss, 2.1ms postprocess per image
+前向传播 FPS:176.76
+Results saved to /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs_assafusion/train2/test_result
+ultralytics.utils.metrics.OBBMetrics object with attributes:
+
+ap_class_index: array([0, 1, 2, 3, 4])
+box: ultralytics.utils.metrics.Metric object
+confusion_matrix: <ultralytics.utils.metrics.ConfusionMatrix object at 0x7f4bb71e1dc0>
+curves: []
+curves_results: []
+fitness: 0.6748171133991736
+keys: ['metrics/precision(B)', 'metrics/recall(B)', 'metrics/mAP50(B)', 'metrics/mAP50-95(B)']
+maps: array([    0.83374,     0.63183,     0.80385,     0.50137,     0.52942])
+names: {0: 'car', 1: 'truck', 2: 'bus', 3: 'van', 4: 'freight_car'}
+plot: True
+results_dict: {'metrics/precision(B)': 0.780376143503406, 'metrics/recall(B)': 0.782119239383672, 'metrics/mAP50(B)': 0.8078013336523725, 'metrics/mAP50-95(B)': 0.660041088926596, 'fitness': 0.6748171133991736}
+save_dir: PosixPath('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs_assafusion/train2/test_result')
+speed: {'preprocess': 0.26228881891161404, 'inference': 5.657542309410588, 'loss': 0.0007769047284710381, 'postprocess': 2.051595245012993}
+
