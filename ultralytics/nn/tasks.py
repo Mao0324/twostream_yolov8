@@ -216,7 +216,7 @@ class BaseModel(nn.Module):
                         x3=m(x3)
                         rgb,ir = torch.chunk(x3, 2, dim=1)
                         x=[]#中间层
-            elif m.i<23:
+            elif m.i < getattr(self, "twostream_backbone_end", 23):
                 if isR:
                     x= m(rgb)
                     rgb=x
@@ -391,6 +391,7 @@ class DetectionModel(BaseModel):
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
+        self.twostream_backbone_end = self.yaml.get("twostream_backbone_end", 23)
 
         # Build strides
         m = self.model[-1]  # Detect()
