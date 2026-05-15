@@ -75,6 +75,9 @@ class BaseDataset(Dataset):
         self.fraction = fraction
         self.im_files = self.get_img_files(self.img_path)
         self.imir_files = self.get_img_files(self.imgir_path)
+        assert len(self.im_files) == len(
+            self.imir_files
+        ), f"{self.prefix}RGB/IR image counts differ: {len(self.im_files)} vs {len(self.imir_files)}"
 
         self.labels = self.get_labels()
         #self.labelsir= self.get_irlabels()
@@ -158,60 +161,55 @@ class BaseDataset(Dataset):
     def load_image(self, i, rect_mode=True):
         """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        
-        # Read paired infrared image from explicit IR split file list.
-        f1 = self.imir_files[i]
-        imir = cv2.imread(f1)
-        
-        #imir=cv2.cvtColor(imir,cv2.COLOR_BGR2GRAY) #转化为i灰度图像
+        if im is not None:
+            return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-        # if imir.ndim == 2:  
-        #     imir = imir[:, :, np.newaxis]  # 添加一个通道维度
-        
-        if im is None:  # not cached in RAM
-            if fn.exists():  # load npy
-                try:
-                    im = np.load(fn)
-                except Exception as e:
-                    LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
-                    Path(fn).unlink(missing_ok=True)
-                    im = cv2.imread(f)  # BGR
-            else:  # read image
+        # not cached in RAM
+        if fn.exists():  # load npy
+            try:
+                im = np.load(fn)
+            except Exception as e:
+                LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
+                Path(fn).unlink(missing_ok=True)
                 im = cv2.imread(f)  # BGR
-            if im is None:
-                raise FileNotFoundError(f"Image Not Found {f}")
+        else:  # read image
+            im = cv2.imread(f)  # BGR
+        if im is None:
+            raise FileNotFoundError(f"Image Not Found {f}")
 
-            # import matplotlib.pyplot as plt  
+        # import matplotlib.pyplot as plt
 
-            # plt.imshow(im)
-            # plt.savefig('/home/mjy/ultralytics/images/'+str(i)+'rgb.jpg')
-            # plt.close()
+        # plt.imshow(im)
+        # plt.savefig('/home/mjy/ultralytics/images/'+str(i)+'rgb.jpg')
+        # plt.close()
 
-            # cv2.imwrite('/home/mjy/ultralytics/images/'+str(i)+'ir.jpg', imir) #保存
+        if not (im.ndim == 3 and im.shape[2] == 6):
+            # Read paired infrared image from explicit IR split file list.
+            f1 = self.imir_files[i]
+            imir = cv2.imread(f1)
             if imir is None:
                 raise FileNotFoundError(f"IR Image Not Found {f1}")
             im = np.dstack((im, imir))
-            h0, w0 = im.shape[:2]  # orig hw
-            if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
-                r = self.imgsz / max(h0, w0)  # ratio
-                if r != 1:  # if sizes are not equal
-                    w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-                    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
 
-            # Add to buffer if training with augmentations
-            if self.augment:
-                self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
-                self.buffer.append(i)
-                if len(self.buffer) >= self.max_buffer_length:
-                    j = self.buffer.pop(0)
-                    if self.cache != "ram":
-                        self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+        h0, w0 = im.shape[:2]  # orig hw
+        if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
+            r = self.imgsz / max(h0, w0)  # ratio
+            if r != 1:  # if sizes are not equal
+                w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+                im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+        elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
+            im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
 
-            return im, (h0, w0), im.shape[:2]
+        # Add to buffer if training with augmentations
+        if self.augment:
+            self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
+            self.buffer.append(i)
+            if len(self.buffer) >= self.max_buffer_length:
+                j = self.buffer.pop(0)
+                if self.cache != "ram":
+                    self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
 
-        return self.ims[i], self.im_hw0[i], self.im_hw[i]
+        return im, (h0, w0), im.shape[:2]
 
     def loadir_image(self, i, rect_mode=True):
         """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
@@ -302,7 +300,13 @@ class BaseDataset(Dataset):
         """Saves an image as an *.npy file for faster loading."""
         f = self.npy_files[i]
         if not f.exists():
-            np.save(f.as_posix(), cv2.imread(self.im_files[i]), allow_pickle=False)
+            im = cv2.imread(self.im_files[i])
+            imir = cv2.imread(self.imir_files[i])
+            if im is None:
+                raise FileNotFoundError(f"Image Not Found {self.im_files[i]}")
+            if imir is None:
+                raise FileNotFoundError(f"IR Image Not Found {self.imir_files[i]}")
+            np.save(f.as_posix(), np.dstack((im, imir)), allow_pickle=False)
     def cacheir_images_to_disk(self, i):
         """Saves an image as an *.npy file for faster loading."""
         f = self.npyir_files[i]
@@ -314,9 +318,13 @@ class BaseDataset(Dataset):
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
-            im = cv2.imread(random.choice(self.im_files))  # sample image
+            i = random.randrange(self.ni)
+            im = cv2.imread(self.im_files[i])  # sample image
+            imir = cv2.imread(self.imir_files[i])
+            if im is None or imir is None:
+                continue
             ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
-            b += im.nbytes * ratio**2
+            b += (im.nbytes + imir.nbytes) * ratio**2
         mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
         mem = psutil.virtual_memory()
         success = mem_required < mem.available  # to cache or not to cache, that is the question
