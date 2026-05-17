@@ -43,6 +43,7 @@ __all__ = (
     "SparseCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
+    "ASSARIFusionSpatialAlign",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1728,6 +1729,114 @@ class ASSARIFusion(nn.Module):
         return torch.cat([rgb, ir], dim=1)
 
 
+class LightSpatialAlign2d(nn.Module):
+    """Lightweight reference-to-source spatial alignment with identity initialization."""
+
+    def __init__(self, c, reduction=8, max_offset=2.0):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        self.max_offset = float(max_offset)
+        self.norm_src = LayerNorm2d(c)
+        self.norm_ref = LayerNorm2d(c)
+        self.reduce = nn.Sequential(
+            nn.Conv2d(2 * c, hidden, 1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(inplace=True),
+        )
+        self.local = nn.Sequential(
+            nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(inplace=True),
+        )
+        self.offset = nn.Conv2d(hidden, 2, 1)
+        self.gate = nn.Sequential(nn.Conv2d(hidden, 1, 1), nn.Sigmoid())
+        nn.init.zeros_(self.offset.weight)
+        nn.init.zeros_(self.offset.bias)
+
+    def forward(self, src, ref):
+        """Warp ref toward src and blend with the original ref."""
+        b, _, h, w = src.shape
+        feat = self.local(self.reduce(torch.cat((self.norm_src(src), self.norm_ref(ref)), dim=1)))
+        offset = torch.tanh(self.offset(feat)) * self.max_offset
+        gate = self.gate(feat)
+
+        yy, xx = torch.meshgrid(
+            torch.linspace(-1.0, 1.0, h, device=src.device, dtype=src.dtype),
+            torch.linspace(-1.0, 1.0, w, device=src.device, dtype=src.dtype),
+            indexing="ij",
+        )
+        base_grid = torch.stack((xx, yy), dim=-1).unsqueeze(0).expand(b, h, w, 2)
+        offset_x = offset[:, 0] * (2.0 / max(w - 1, 1))
+        offset_y = offset[:, 1] * (2.0 / max(h - 1, 1))
+        offset_grid = torch.stack((offset_x, offset_y), dim=-1)
+        aligned = F.grid_sample(ref, base_grid + offset_grid, mode="bilinear", padding_mode="border", align_corners=True)
+        return ref + gate * (aligned - ref)
+
+
+class LocalSpatialDelta2d(nn.Module):
+    """Depthwise local spatial delta for cross-modal detail compensation."""
+
+    def __init__(self, c, kernel_size=3):
+        super().__init__()
+        kernel_size = int(kernel_size)
+        padding = kernel_size // 2
+        self.net = nn.Sequential(
+            nn.Conv2d(2 * c, c, 1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c, c, kernel_size, padding=padding, groups=c, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c, c, 1, bias=False),
+        )
+
+    def forward(self, src, ref):
+        """Return local spatial compensation from aligned ref to src."""
+        return self.net(torch.cat((src, ref), dim=1))
+
+
+class ASSARIFusionSpatialAlign(nn.Module):
+    """ASSARIFusion variant with optional local spatial delta and light reference alignment."""
+
+    def __init__(
+        self,
+        c,
+        reduction=8,
+        heads=4,
+        norm_attn=True,
+        local_kernel=3,
+        align=False,
+        align_max_offset=2.0,
+        init_scale=1e-3,
+    ):
+        super().__init__()
+        self.c = c
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.local = LocalSpatialDelta2d(c, local_kernel) if int(local_kernel) > 0 else None
+        self.align = bool(align)
+        if self.align:
+            self.spatial_align = LightSpatialAlign2d(c, reduction, align_max_offset)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse concatenated RGB/IR feature tensor."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSARIFusionSpatialAlign expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        ir_ref = self.spatial_align(rgb, ir) if self.align else ir
+        rgb_ref = self.spatial_align(ir, rgb) if self.align else rgb
+        delta_rgb = self.xattn(rgb, ir_ref)
+        delta_ir = self.xattn(ir, rgb_ref)
+        if self.local is not None:
+            delta_rgb = delta_rgb + self.local(rgb, ir_ref)
+            delta_ir = delta_ir + self.local(ir, rgb_ref)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
 class ASSARefine(nn.Module):
     """ASSA-style self refinement, input [B, C, H, W], output [B, C, H, W]."""
 
@@ -3085,5 +3194,4 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
 
