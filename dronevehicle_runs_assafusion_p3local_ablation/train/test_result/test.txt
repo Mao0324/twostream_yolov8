@@ -2,29 +2,29 @@
 Ultralytics YOLOv8.1.47 🚀 Python-3.9.0 torch-2.0.0+cu117 CUDA:0 (NVIDIA GeForce RTX 3090, 24133MiB)
 YOLOv8_twostream_obb_assafusion_p3local_ablation summary (fused): 302 layers, 14914100 parameters, 0 gradients, 38.7 GFLOPs
 val: Scanning /home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/labels/test.cache... 8980 images, 18 backgrounds, 0 corrupt: 100%|██████████| 8980/8980 [00:00<?, ?it/s]
-                 Class     Images  Instances      Box(P          R      mAP50  mAP50-95): 100%|██████████| 562/562 [02:23<00:00,  3.91it/s]
-                   all       8980     159616      0.774      0.782      0.803      0.654
-                   car       8980     137148      0.944      0.968      0.985      0.832
-                 truck       8980       8657      0.757      0.772      0.806      0.628
-                   bus       8980       4467      0.903      0.929       0.96        0.8
-                   van       8980       4282      0.655      0.547       0.61      0.497
-           freight_car       8980       5062      0.613      0.695      0.656      0.516
-Speed: 0.3ms preprocess, 3.8ms inference, 0.0ms loss, 2.7ms postprocess per image
-前向传播 FPS:260.80
+                 Class     Images  Instances      Box(P          R      mAP50  mAP50-95): 100%|██████████| 562/562 [02:24<00:00,  3.90it/s]
+                   all       8980     159616       0.79      0.784      0.813      0.666
+                   car       8980     137148      0.948      0.967      0.985      0.836
+                 truck       8980       8657      0.766      0.784      0.816       0.64
+                   bus       8980       4467      0.928      0.929      0.963      0.809
+                   van       8980       4282      0.694      0.548      0.629      0.516
+           freight_car       8980       5062      0.616      0.693      0.673      0.532
+Speed: 0.3ms preprocess, 3.9ms inference, 0.0ms loss, 2.7ms postprocess per image
+前向传播 FPS:259.39
 Results saved to /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs_assafusion_p3local_ablation/train/test_result
 ultralytics.utils.metrics.OBBMetrics object with attributes:
 
 ap_class_index: array([0, 1, 2, 3, 4])
 box: ultralytics.utils.metrics.Metric object
-confusion_matrix: <ultralytics.utils.metrics.ConfusionMatrix object at 0x7fad9f087340>
+confusion_matrix: <ultralytics.utils.metrics.ConfusionMatrix object at 0x7f63136e82e0>
 curves: []
 curves_results: []
-fitness: 0.6692734483248032
+fitness: 0.6810755478886183
 keys: ['metrics/precision(B)', 'metrics/recall(B)', 'metrics/mAP50(B)', 'metrics/mAP50-95(B)']
-maps: array([    0.83187,     0.62754,      0.7997,     0.49722,     0.51558])
+maps: array([     0.8357,     0.63958,     0.80878,     0.51586,     0.53211])
 names: {0: 'car', 1: 'truck', 2: 'bus', 3: 'van', 4: 'freight_car'}
 plot: True
-results_dict: {'metrics/precision(B)': 0.7743231505323525, 'metrics/recall(B)': 0.7824272395304422, 'metrics/mAP50(B)': 0.80329188120787, 'metrics/mAP50-95(B)': 0.6543825113377957, 'fitness': 0.6692734483248032}
+results_dict: {'metrics/precision(B)': 0.790179644952904, 'metrics/recall(B)': 0.7842477530387029, 'metrics/mAP50(B)': 0.8131022500525956, 'metrics/mAP50-95(B)': 0.6664059143148431, 'fitness': 0.6810755478886183}
 save_dir: PosixPath('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/dronevehicle_runs_assafusion_p3local_ablation/train/test_result')
-speed: {'preprocess': 0.27577842529738666, 'inference': 3.834295379026961, 'loss': 0.0007045561061935594, 'postprocess': 2.7233750358190725}
+speed: {'preprocess': 0.2779069615897198, 'inference': 3.855136826733969, 'loss': 0.0007972950924743789, 'postprocess': 2.698507314269951}
 
