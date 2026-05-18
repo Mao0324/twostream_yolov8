@@ -1,6 +1,6 @@
 task: obb
 mode: train
-model: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion_p3local_align_lightp5.yaml
+model: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion.yaml
 data: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/dronevehicle.yaml
 epochs: 100
 time: null
@@ -12,8 +12,8 @@ save_period: -1
 cache: false
 device: 5,6
 workers: 8
-project: dronevehicle_runs_assafusion_p3local_align_lightp5
-name: train
+project: dronevehicle_runs_assafusion
+name: train3
 exist_ok: false
 pretrained: true
 optimizer: SGD
@@ -103,4 +103,4 @@ erasing: 0.4
 crop_fraction: 1.0
 cfg: null
 tracker: botsort.yaml
-save_dir: dronevehicle_runs_assafusion_p3local_align_lightp5/train
+save_dir: dronevehicle_runs_assafusion/train3
