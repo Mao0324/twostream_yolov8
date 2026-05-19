@@ -5,12 +5,12 @@ data: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/dronevehicl
 epochs: 100
 time: null
 patience: 400
-batch: 128
+batch: 64
 imgsz: 640
 save: true
 save_period: -1
 cache: false
-device: 2,3,5,6
+device: 5,6
 workers: 8
 project: dronevehicle_runs_ablation_entmax_gate
 name: gate

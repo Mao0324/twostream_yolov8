@@ -11,10 +11,10 @@ model.load('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-traine
 # 3) 训练
 results = model.train(
     data='/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/data/dronevehicle.yaml',
-    batch=128,
+    batch=64,
     epochs=100,
     imgsz=640,
-    device='2,3,5,6',
+    device='5,6',
     project='dronevehicle_runs_ablation_entmax_gate',
     name='gate',
     task='obb'
