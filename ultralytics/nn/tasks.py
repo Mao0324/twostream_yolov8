@@ -46,6 +46,7 @@ from ultralytics.nn.modules import (
     RepNCSPELAN4,
     ResNetLayer,
     RTDETRDecoder,
+    RTDETRDecoderOBB,
     Segment,
     Silence,
     WorldDetect,
@@ -121,7 +122,7 @@ class BaseModel(nn.Module):
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, profile=False, visualize=False, augment=False, embed=None, batch=None):
         """
         Perform a forward pass through the network.
 
@@ -137,9 +138,9 @@ class BaseModel(nn.Module):
         """
         if augment:
             return self._predict_augment(x)
-        return self._predict_once(x, profile, visualize, embed)
+        return self._predict_once(x, profile, visualize, embed, batch)
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+    def _predict_once(self, x, profile=False, visualize=False, embed=None, batch=None):
         """
         Perform a forward pass through the network.
 
@@ -224,8 +225,8 @@ class BaseModel(nn.Module):
                 else :
                     x = m(ir)  # run
                     ir=x
-            else :
-                x=m(x)
+            else:
+                x = m(x, batch) if m == self.model[-1] and isinstance(m, RTDETRDecoderOBB) else m(x)
 
 
 
@@ -467,7 +468,49 @@ class OBBModel(DetectionModel):
  
     def init_criterion(self):
         """Initialize the loss criterion for the model."""
+        if isinstance(self.model[-1], RTDETRDecoderOBB):
+            from ultralytics.models.utils.loss import RTDETRObbLoss
+
+            return RTDETRObbLoss(nc=self.model[-1].nc, use_vfl=True)
         return v8OBBLoss(self)
+
+    def loss(self, batch, preds=None):
+        """Compute OBB loss, including the RT-DETR OBB decoder format."""
+        if not hasattr(self, "criterion"):
+            self.criterion = self.init_criterion()
+
+        if isinstance(self.model[-1], RTDETRDecoderOBB):
+            batch_idx = batch["batch_idx"]
+            gt_groups = [(batch_idx == i).sum().item() for i in range(len(batch["img"]))]
+            targets = {
+                "cls": batch["cls"].to(batch["img"].device, dtype=torch.long).view(-1),
+                "bboxes": batch["bboxes"].to(device=batch["img"].device),
+                "batch_idx": batch_idx.to(batch["img"].device, dtype=torch.long).view(-1),
+                "gt_groups": gt_groups,
+            }
+            preds = self.predict(batch["img"], batch=targets) if preds is None else preds
+            dec_bboxes, dec_scores, dec_angles, enc_bboxes, enc_scores, enc_angles, dn_meta = (
+                preds[1] if not self.training and isinstance(preds, (tuple, list)) and len(preds) == 2 else preds
+            )
+
+            dn_bboxes = dn_scores = None
+            if dn_meta is not None:
+                dn_bbox, dec_bboxes = torch.split(dec_bboxes, dn_meta["dn_num_split"], dim=2)
+                dn_angle, dec_angles = torch.split(dec_angles, dn_meta["dn_num_split"], dim=2)
+                dn_scores, dec_scores = torch.split(dec_scores, dn_meta["dn_num_split"], dim=2)
+                dn_bboxes = torch.cat((dn_bbox, dn_angle), dim=-1)
+
+            dec_bboxes = torch.cat((dec_bboxes, dec_angles), dim=-1)
+            enc_bboxes = torch.cat((enc_bboxes, enc_angles), dim=-1)
+            dec_bboxes = torch.cat([enc_bboxes.unsqueeze(0), dec_bboxes])
+            dec_scores = torch.cat([enc_scores.unsqueeze(0), dec_scores])
+
+            loss = self.criterion((dec_bboxes, dec_scores), targets, dn_bboxes=dn_bboxes, dn_scores=dn_scores, dn_meta=dn_meta)
+            return sum(loss.values()), torch.as_tensor(
+                [loss[k].detach() for k in ["loss_giou", "loss_class", "loss_bbox"]], device=batch["img"].device
+            )
+
+        return self.criterion(preds if preds is not None else self.forward(batch["img"]), batch)
 
 
 class SegmentationModel(DetectionModel):
@@ -1154,7 +1197,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
                 
-        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        elif m in {RTDETRDecoder, RTDETRDecoderOBB}:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
         elif m is CBLinear:
             c2 = args[0]
@@ -1267,7 +1310,7 @@ def guess_model_task(model):
             return "segment"
         if m == "pose":
             return "pose"
-        if m == "obb":
+        if m in {"obb", "rtdetrdecoderobb"}:
             return "obb"
 
     # Guess from model cfg
@@ -1291,7 +1334,7 @@ def guess_model_task(model):
                 return "classify"
             elif isinstance(m, Pose):
                 return "pose"
-            elif isinstance(m, OBB):
+            elif isinstance(m, (OBB, RTDETRDecoderOBB)):
                 return "obb"
             elif isinstance(m, (Detect, WorldDetect)):
                 return "detect"

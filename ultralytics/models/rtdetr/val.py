@@ -5,9 +5,10 @@ import torch
 from ultralytics.data import YOLODataset
 from ultralytics.data.augment import Compose, Format, v8_transforms
 from ultralytics.models.yolo.detect import DetectionValidator
+from ultralytics.models.yolo.obb.val import OBBValidator
 from ultralytics.utils import colorstr, ops
 
-__all__ = ("RTDETRValidator",)  # tuple or list
+__all__ = "RTDETRValidator", "RTDETRObbValidator"  # tuple or list
 
 
 class RTDETRDataset(YOLODataset):
@@ -42,6 +43,7 @@ class RTDETRDataset(YOLODataset):
                 normalize=True,
                 return_mask=self.use_segments,
                 return_keypoint=self.use_keypoints,
+                return_obb=self.use_obb,
                 batch_idx=True,
                 mask_ratio=hyp.mask_ratio,
                 mask_overlap=hyp.overlap_mask,
@@ -133,3 +135,22 @@ class RTDETRValidator(DetectionValidator):
         predn[..., [0, 2]] *= pbatch["ori_shape"][1] / self.args.imgsz  # native-space pred
         predn[..., [1, 3]] *= pbatch["ori_shape"][0] / self.args.imgsz  # native-space pred
         return predn.float()
+
+
+class RTDETRObbValidator(OBBValidator):
+    """OBB validator with RT-DETR dataset settings."""
+
+    def build_dataset(self, img_path, mode="val", batch=None):
+        """Build an RT-DETR OBB dataset."""
+        return RTDETRDataset(
+            img_path=img_path,
+            imgsz=self.args.imgsz,
+            batch_size=batch,
+            augment=False,
+            hyp=self.args,
+            rect=False,
+            cache=self.args.cache or None,
+            prefix=colorstr(f"{mode}: "),
+            data=self.data,
+            task="obb",
+        )

@@ -8,11 +8,11 @@ For more information on RT-DETR, visit: https://arxiv.org/pdf/2304.08069.pdf
 """
 
 from ultralytics.engine.model import Model
-from ultralytics.nn.tasks import RTDETRDetectionModel
+from ultralytics.nn.tasks import OBBModel, RTDETRDetectionModel
 
-from .predict import RTDETRPredictor
-from .train import RTDETRTrainer
-from .val import RTDETRValidator
+from .predict import RTDETRObbPredictor, RTDETRPredictor
+from .train import RTDETRObbTrainer, RTDETRTrainer
+from .val import RTDETRObbValidator, RTDETRValidator
 
 
 class RTDETR(Model):
@@ -34,7 +34,8 @@ class RTDETR(Model):
         Raises:
             NotImplementedError: If the model file extension is not 'pt', 'yaml', or 'yml'.
         """
-        super().__init__(model=model, task="detect")
+        task = "obb" if "obb" in str(model).lower() else "detect"
+        super().__init__(model=model, task=task)
 
     @property
     def task_map(self) -> dict:
@@ -50,5 +51,11 @@ class RTDETR(Model):
                 "validator": RTDETRValidator,
                 "trainer": RTDETRTrainer,
                 "model": RTDETRDetectionModel,
-            }
+            },
+            "obb": {
+                "predictor": RTDETRObbPredictor,
+                "validator": RTDETRObbValidator,
+                "trainer": RTDETRObbTrainer,
+                "model": OBBModel,
+            },
         }

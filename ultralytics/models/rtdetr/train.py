@@ -5,10 +5,11 @@ from copy import copy
 import torch
 
 from ultralytics.models.yolo.detect import DetectionTrainer
-from ultralytics.nn.tasks import RTDETRDetectionModel
+from ultralytics.models.yolo.obb.train import OBBTrainer
+from ultralytics.nn.tasks import OBBModel, RTDETRDetectionModel
 from ultralytics.utils import RANK, colorstr
 
-from .val import RTDETRDataset, RTDETRValidator
+from .val import RTDETRDataset, RTDETRObbValidator, RTDETRValidator
 
 
 class RTDETRTrainer(DetectionTrainer):
@@ -100,3 +101,19 @@ class RTDETRTrainer(DetectionTrainer):
             gt_bbox.append(batch["bboxes"][batch_idx == i].to(batch_idx.device))
             gt_class.append(batch["cls"][batch_idx == i].to(device=batch_idx.device, dtype=torch.long))
         return batch
+
+
+class RTDETRObbTrainer(OBBTrainer):
+    """Trainer for RT-DETR OBB YAMLs."""
+
+    def get_model(self, cfg=None, weights=None, verbose=True):
+        """Return an OBBModel that can host RTDETRDecoderOBB."""
+        model = OBBModel(cfg, ch=3, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        if weights:
+            model.load(weights)
+        return model
+
+    def get_validator(self):
+        """Return the RT-DETR OBB validator."""
+        self.loss_names = "giou_loss", "cls_loss", "l1_loss"
+        return RTDETRObbValidator(self.test_loader, save_dir=self.save_dir, args=copy(self.args))

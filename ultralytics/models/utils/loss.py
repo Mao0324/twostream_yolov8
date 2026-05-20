@@ -3,9 +3,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
 
 from ultralytics.utils.loss import FocalLoss, VarifocalLoss
-from ultralytics.utils.metrics import bbox_iou
+from ultralytics.utils.metrics import batch_probiou, bbox_iou, probiou
 
 from .ops import HungarianMatcher
 
@@ -344,3 +345,115 @@ class RTDETRDetectionLoss(DETRLoss):
             else:
                 dn_match_indices.append((torch.zeros([0], dtype=torch.long), torch.zeros([0], dtype=torch.long)))
         return dn_match_indices
+
+
+class RotatedHungarianMatcher(HungarianMatcher):
+    """Hungarian matcher using rotated box probiou for OBB targets."""
+
+    def forward(self, pred_bboxes, pred_scores, gt_bboxes, gt_cls, gt_groups, masks=None, gt_mask=None):
+        """Compute optimal assignment for xywhr predictions and targets."""
+        bs, nq, nc = pred_scores.shape
+
+        if sum(gt_groups) == 0:
+            return [(torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.long)) for _ in range(bs)]
+
+        pred_scores = pred_scores.detach().view(-1, nc)
+        pred_scores = F.sigmoid(pred_scores) if self.use_fl else F.softmax(pred_scores, dim=-1)
+        pred_bboxes = pred_bboxes.detach().view(-1, 5)
+
+        pred_scores = pred_scores[:, gt_cls]
+        if self.use_fl:
+            neg_cost_class = (1 - self.alpha) * (pred_scores**self.gamma) * (-(1 - pred_scores + 1e-8).log())
+            pos_cost_class = self.alpha * ((1 - pred_scores) ** self.gamma) * (-(pred_scores + 1e-8).log())
+            cost_class = pos_cost_class - neg_cost_class
+        else:
+            cost_class = -pred_scores
+
+        cost_bbox = (pred_bboxes.unsqueeze(1) - gt_bboxes.unsqueeze(0)).abs().sum(-1)
+        cost_giou = 1.0 - batch_probiou(pred_bboxes, gt_bboxes)
+
+        C = (
+            self.cost_gain["class"] * cost_class
+            + self.cost_gain["bbox"] * cost_bbox
+            + self.cost_gain["giou"] * cost_giou
+        )
+        C[C.isnan() | C.isinf()] = 0.0
+        C = C.view(bs, nq, -1).cpu()
+        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(gt_groups, -1))]
+        gt_groups = torch.as_tensor([0, *gt_groups[:-1]]).cumsum_(0)
+        return [
+            (torch.tensor(i, dtype=torch.long), torch.tensor(j, dtype=torch.long) + gt_groups[k])
+            for k, (i, j) in enumerate(indices)
+        ]
+
+
+class RTDETRObbLoss(RTDETRDetectionLoss):
+    """RT-DETR loss for oriented bounding box predictions in xywhr format."""
+
+    def __init__(self, nc=80, loss_gain=None, aux_loss=True, use_fl=True, use_vfl=True):
+        """Initialize RT-DETR OBB loss with a rotated matcher."""
+        super().__init__(nc=nc, loss_gain=loss_gain, aux_loss=aux_loss, use_fl=use_fl, use_vfl=use_vfl)
+        self.matcher = RotatedHungarianMatcher(cost_gain={"class": 2, "bbox": 5, "giou": 2})
+
+    def _get_loss_bbox(self, pred_bboxes, gt_bboxes, postfix=""):
+        """Calculate L1 and rotated probiou losses for matched OBB predictions."""
+        name_bbox = f"loss_bbox{postfix}"
+        name_giou = f"loss_giou{postfix}"
+
+        loss = {}
+        if len(gt_bboxes) == 0:
+            loss[name_bbox] = torch.tensor(0.0, device=self.device)
+            loss[name_giou] = torch.tensor(0.0, device=self.device)
+            return loss
+
+        loss[name_bbox] = self.loss_gain["bbox"] * F.l1_loss(pred_bboxes, gt_bboxes, reduction="sum") / len(gt_bboxes)
+        loss[name_giou] = (1.0 - probiou(pred_bboxes, gt_bboxes)).sum() / len(gt_bboxes)
+        loss[name_giou] = self.loss_gain["giou"] * loss[name_giou]
+        return {k: v.squeeze() for k, v in loss.items()}
+
+    def _get_loss(
+        self,
+        pred_bboxes,
+        pred_scores,
+        gt_bboxes,
+        gt_cls,
+        gt_groups,
+        masks=None,
+        gt_mask=None,
+        postfix="",
+        match_indices=None,
+    ):
+        """Get OBB losses."""
+        if match_indices is None:
+            match_indices = self.matcher(pred_bboxes, pred_scores, gt_bboxes, gt_cls, gt_groups)
+
+        idx, gt_idx = self._get_index(match_indices)
+        pred_bboxes, gt_bboxes = pred_bboxes[idx], gt_bboxes[gt_idx]
+
+        bs, nq = pred_scores.shape[:2]
+        targets = torch.full((bs, nq), self.nc, device=pred_scores.device, dtype=gt_cls.dtype)
+        targets[idx] = gt_cls[gt_idx]
+
+        gt_scores = torch.zeros([bs, nq], device=pred_scores.device)
+        if len(gt_bboxes):
+            gt_scores[idx] = probiou(pred_bboxes.detach(), gt_bboxes).squeeze(-1)
+
+        loss = {}
+        loss.update(self._get_loss_class(pred_scores, targets, gt_scores, len(gt_bboxes), postfix))
+        loss.update(self._get_loss_bbox(pred_bboxes, gt_bboxes, postfix))
+        return loss
+
+    def forward(self, preds, batch, dn_bboxes=None, dn_scores=None, dn_meta=None):
+        """Compute RT-DETR OBB loss from decoder outputs."""
+        pred_bboxes, pred_scores = preds
+        total_loss = DETRLoss.forward(self, pred_bboxes, pred_scores, batch)
+
+        if dn_meta is not None and dn_bboxes is not None and dn_scores is not None:
+            dn_pos_idx, dn_num_group = dn_meta["dn_pos_idx"], dn_meta["dn_num_group"]
+            match_indices = self.get_dn_match_indices(dn_pos_idx, dn_num_group, batch["gt_groups"])
+            dn_loss = DETRLoss.forward(self, dn_bboxes, dn_scores, batch, postfix="_dn", match_indices=match_indices)
+            total_loss.update(dn_loss)
+        else:
+            total_loss.update({f"{k}_dn": torch.tensor(0.0, device=self.device) for k in total_loss.keys()})
+
+        return total_loss

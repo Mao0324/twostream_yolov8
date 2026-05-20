@@ -12,9 +12,9 @@ from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
 from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto
 from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
-from .utils import bias_init_with_prob, linear_init
+from .utils import bias_init_with_prob, inverse_sigmoid, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "RTDETRDecoderOBB"
 
 
 class Detect(nn.Module):
@@ -495,3 +495,89 @@ class RTDETRDecoder(nn.Module):
         xavier_uniform_(self.query_pos_head.layers[1].weight)
         for layer in self.input_proj:
             xavier_uniform_(layer[0].weight)
+
+
+class RTDETRDecoderOBB(RTDETRDecoder):
+    """RT-DETR decoder for oriented bounding box detection."""
+
+    def __init__(self, nc=80, ch=(512, 1024, 2048), ne=1, *args, **kwargs):
+        """Initialize the RT-DETR OBB decoder with one angle output by default."""
+        super().__init__(nc, ch, *args, **kwargs)
+        self.ne = ne
+        self.enc_angle_head = MLP(self.hidden_dim, self.hidden_dim, ne, num_layers=3)
+        self.dec_angle_head = nn.ModuleList(
+            [MLP(self.hidden_dim, self.hidden_dim, ne, num_layers=3) for _ in range(self.num_decoder_layers)]
+        )
+
+    @staticmethod
+    def _angle(logits):
+        """Map raw angle logits to the same range used by the YOLO OBB head."""
+        return (logits.sigmoid() - 0.25) * math.pi
+
+    def _decode_obb(self, embed, refer_bbox, feats, shapes, attn_mask=None):
+        """Run deformable decoder and return boxes, class scores, and angles for each decoder layer."""
+        output = embed
+        dec_bboxes, dec_scores, dec_angles = [], [], []
+        last_refined_bbox = None
+        refer_bbox = refer_bbox.sigmoid()
+
+        for i, layer in enumerate(self.decoder.layers):
+            output = layer(output, refer_bbox, feats, shapes, None, attn_mask, self.query_pos_head(refer_bbox))
+            bbox = self.dec_bbox_head[i](output)
+            refined_bbox = torch.sigmoid(bbox + inverse_sigmoid(refer_bbox))
+
+            if self.training:
+                dec_scores.append(self.dec_score_head[i](output))
+                dec_angles.append(self._angle(self.dec_angle_head[i](output)))
+                if i == 0:
+                    dec_bboxes.append(refined_bbox)
+                else:
+                    dec_bboxes.append(torch.sigmoid(bbox + inverse_sigmoid(last_refined_bbox)))
+            elif i == self.decoder.eval_idx:
+                dec_scores.append(self.dec_score_head[i](output))
+                dec_angles.append(self._angle(self.dec_angle_head[i](output)))
+                dec_bboxes.append(refined_bbox)
+                break
+
+            last_refined_bbox = refined_bbox
+            refer_bbox = refined_bbox.detach() if self.training else refined_bbox
+
+        return torch.stack(dec_bboxes), torch.stack(dec_scores), torch.stack(dec_angles)
+
+    def forward(self, x, batch=None):
+        """Run the OBB decoder and return xywh + class scores + angle predictions."""
+        feats, shapes = self._get_encoder_input(x)
+
+        dn_embed = dn_bbox = attn_mask = dn_meta = None
+        if batch is not None:
+            from ultralytics.models.utils.ops import get_cdn_group
+
+            dn_batch = {**batch, "bboxes": batch["bboxes"][..., :4]}
+            dn_embed, dn_bbox, attn_mask, dn_meta = get_cdn_group(
+                dn_batch,
+                self.nc,
+                self.num_queries,
+                self.denoising_class_embed.weight,
+                self.num_denoising,
+                self.label_noise_ratio,
+                self.box_noise_scale,
+                self.training,
+            )
+
+        embed, refer_bbox, enc_bboxes, enc_scores = self._get_decoder_input(feats, shapes, dn_embed, dn_bbox)
+        enc_query_embed = embed[:, -self.num_queries :, :]
+        enc_angles = self._angle(self.enc_angle_head(enc_query_embed))
+
+        dec_bboxes, dec_scores, dec_angles = self._decode_obb(embed, refer_bbox, feats, shapes, attn_mask=attn_mask)
+        if dn_meta is not None:
+            dn_angles = dec_angles.new_zeros(*dec_angles.shape[:2], dn_meta["dn_num_split"][0], self.ne)
+            dec_angles = torch.cat((dn_angles, dec_angles[..., -self.num_queries :, :]), dim=2)
+
+        x = dec_bboxes, dec_scores, dec_angles, enc_bboxes, enc_scores, enc_angles, dn_meta
+        if self.training:
+            return x
+
+        # OBB NMS expects model output in (bs, 4 + nc + angle, num_queries) format.
+        y = torch.cat((dec_bboxes.squeeze(0), dec_scores.squeeze(0).sigmoid(), dec_angles.squeeze(0)), -1)
+        y = y.transpose(-1, -2)
+        return y if self.export else (y, x)

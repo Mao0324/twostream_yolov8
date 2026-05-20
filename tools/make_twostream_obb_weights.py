@@ -6,16 +6,21 @@ Default paths match the user's requested locations:
   output: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt
 
 Usage:
-  python make_twostream_obb_weights.py \
-      --target-yaml /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s.yaml
+  python tools/make_twostream_obb_weights.py \
+      --target-yaml yaml/yolov8_twostream_rtdetr_obb_assafusion_postc2f.yaml
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import torch
 import ultralytics
@@ -23,28 +28,32 @@ from ultralytics import YOLO
 
 
 DEFAULT_SOURCE = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
-DEFAULT_TARGET_YAML = Path("/home/ubuntu/MCONG/MCONG/twostream_yolov8/yaml/yolov8_twostream_obb_assafusion_postc2f.yaml")
-DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt")
+DEFAULT_TARGET_YAML = Path(
+    "/home/ubuntu/MCONG/MCONG/twostream_yolov8/yaml/yolov8_twostream_rtdetr_obb_assafusion_postc2f.yaml"
+)
+DEFAULT_OUTPUT = Path(
+    "/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream_rtdetr_obb.pt"
+)
 
-# single-stream yolov8s(-obb) layer index -> two-stream RGB branch layer index
+# single-stream yolov8s(-obb) layer index -> two-stream post-C2f RGB/shared layer index.
+# This intentionally excludes the final OBB head because RTDETRDecoderOBB has a different parameter structure.
 SINGLE_TO_TWOSTREAM_RGB = {
     0: 0,
     1: 1,
     2: 2,
     3: 3,
     4: 8,
-    5: 13,
-    6: 15,
-    7: 20,
-    8: 22,
-    9: 24,
-    12: 34,
-    15: 37,
-    16: 38,
-    18: 40,
-    19: 41,
-    21: 43,
-    22: 44,
+    5: 11,
+    6: 13,
+    7: 16,
+    8: 18,
+    9: 20,
+    12: 28,
+    15: 31,
+    16: 32,
+    18: 34,
+    19: 35,
+    21: 37,
 }
 
 # two-stream RGB branch layer index -> two-stream IR branch layer index
@@ -54,11 +63,11 @@ TWOSTREAM_RGB_TO_IR = {
     2: 6,
     3: 7,
     8: 9,
+    11: 12,
     13: 14,
-    15: 16,
+    16: 17,
+    18: 19,
     20: 21,
-    22: 23,
-    24: 25,
 }
 
 
@@ -93,6 +102,19 @@ def _copy_with_layer_map(src_sd: dict, dst_sd: dict, layer_map: dict[int, int], 
     return copied, miss, mismatch
 
 
+def _load_source_state_dict(path: Path) -> dict:
+    """Load a trusted local checkpoint and return its model state dict."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    model = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
+    if hasattr(model, "float"):
+        model = model.float()
+    if hasattr(model, "state_dict"):
+        return model.state_dict()
+    if isinstance(model, dict):
+        return model
+    raise TypeError(f"Unsupported source checkpoint format: {path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build two-stream OBB checkpoint from single-stream OBB checkpoint.")
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="Single-stream .pt checkpoint path.")
@@ -106,15 +128,14 @@ def main() -> int:
         raise FileNotFoundError(f"target yaml not found: {args.target_yaml}")
 
     yaml_text = args.target_yaml.read_text(encoding="utf-8", errors="ignore")
-    if "OBB" not in yaml_text:
+    if "OBB" not in yaml_text and "RTDETRDecoderOBB" not in yaml_text:
         print(
-            "[WARN] target yaml does not contain 'OBB' head. "
-            "Script can still run, but for OBB training you should use an OBB-head yaml."
+            "[WARN] target yaml does not contain an OBB head/decoder. "
+            "Script can still run, but for OBB training you should use an OBB yaml."
         )
 
     print(f"[INFO] loading source: {args.source}")
-    single = YOLO(str(args.source), task="obb")
-    src_sd = single.model.state_dict()
+    src_sd = _load_source_state_dict(args.source)
 
     print(f"[INFO] building two-stream model from: {args.target_yaml}")
     two = YOLO(str(args.target_yaml), task="obb")

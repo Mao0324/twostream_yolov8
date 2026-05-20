@@ -5,6 +5,7 @@ import torch
 from ultralytics.data.augment import LetterBox
 from ultralytics.engine.predictor import BasePredictor
 from ultralytics.engine.results import Results
+from ultralytics.models.yolo.obb.predict import OBBPredictor
 from ultralytics.utils import ops
 
 
@@ -82,5 +83,14 @@ class RTDETRPredictor(BasePredictor):
         Returns:
             (list): List of pre-transformed images ready for model inference.
         """
+        letterbox = LetterBox(self.imgsz, auto=False, scaleFill=True)
+        return [letterbox(image=x) for x in im]
+
+
+class RTDETRObbPredictor(OBBPredictor):
+    """RT-DETR OBB predictor using scale-filled RT-DETR preprocessing and rotated NMS."""
+
+    def pre_transform(self, im):
+        """Pre-transform images to square scale-filled inputs required by RT-DETR decoders."""
         letterbox = LetterBox(self.imgsz, auto=False, scaleFill=True)
         return [letterbox(image=x) for x in im]
