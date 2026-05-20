@@ -23,7 +23,7 @@ from ultralytics import YOLO
 
 
 DEFAULT_SOURCE = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
-DEFAULT_TARGET_YAML = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion.yaml")
+DEFAULT_TARGET_YAML = Path("/home/ubuntu/MCONG/MCONG/twostream_yolov8/yaml/yolov8_twostream_obb_assafusion_postc2f.yaml")
 DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt")
 
 # single-stream yolov8s(-obb) layer index -> two-stream RGB branch layer index
@@ -32,19 +32,19 @@ SINGLE_TO_TWOSTREAM_RGB = {
     1: 1,
     2: 2,
     3: 3,
-    4: 9,
-    5: 10,
-    6: 14,
-    7: 15,
-    8: 19,
-    9: 20,
-    12: 28,
-    15: 31,
-    16: 32,
-    18: 34,
-    19: 35,
-    21: 37,
-    22: 38,
+    4: 8,
+    5: 13,
+    6: 15,
+    7: 20,
+    8: 22,
+    9: 24,
+    12: 34,
+    15: 37,
+    16: 38,
+    18: 40,
+    19: 41,
+    21: 43,
+    22: 44,
 }
 
 # two-stream RGB branch layer index -> two-stream IR branch layer index
@@ -53,12 +53,12 @@ TWOSTREAM_RGB_TO_IR = {
     1: 5,
     2: 6,
     3: 7,
-    9: 11,
-    10: 12,
-    14: 16,
-    15: 17,
-    19: 21,
-    20: 22,
+    8: 9,
+    13: 14,
+    15: 16,
+    20: 21,
+    22: 23,
+    24: 25,
 }
 
 
@@ -146,4 +146,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
