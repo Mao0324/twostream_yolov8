@@ -186,6 +186,7 @@ class BaseModel(nn.Module):
         
 
         isR=True # 当前是否为RGB
+        dual_stream_until = next((layer.i for layer in self.model if isinstance(layer, (ADD, ASSAAdd))), len(self.model))
 
         for m in self.model:
             
@@ -216,7 +217,7 @@ class BaseModel(nn.Module):
                         x3=m(x3)
                         rgb,ir = torch.chunk(x3, 2, dim=1)
                         x=[]#中间层
-            elif m.i<23:
+            elif m.i<dual_stream_until:
                 if isR:
                     x= m(rgb)
                     rgb=x
@@ -960,13 +961,21 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     
+    layer_defs = d["backbone"] + d["head"]
+    def module_name_of(module_name):
+        return module_name if isinstance(module_name, str) else getattr(module_name, "__name__", str(module_name))
+
+    first_add_i = next(
+        (i for i, (_, _, module_name, _) in enumerate(layer_defs) if module_name_of(module_name) in {"ADD", "ASSAAdd"}),
+        len(layer_defs),
+    )
+
+    stream_rgb_ch = stream_ir_ch = ch
+    parse_is_rgb = True
     ch = [ch]
-    
-    tx=[3,256,256,512,512,1024,1024]
-        
-    ty=0
+
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
+    for i, (f, n, m, args) in enumerate(layer_defs):  # from, number, module, args
         # m = getattr(torch.nn, m[3:]) if "nn." in m else globals()[m]  # get module
         try:
             if m == 'node_mode':
@@ -1027,12 +1036,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
             c1, c2 = ch[f], args[0]
             if f==-4:
-                c1=tx[ty]
-                if ty!=0:
-                    c1=c1*width
-            
-                c1=int(c1)
-                ty+=1
+                c1 = stream_ir_ch if parse_is_rgb else stream_rgb_ch
                 
             # if f==-4:
             # #此时为下个backbonce,红外光
@@ -1078,8 +1082,15 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is RIFusion:
             args = [args[0]] 
         elif m is ASSARIFusion:
-            c2 = ch[-1]
+            c2 = stream_rgb_ch
             args = [c2, *args[1:]]
+        elif m is Silence:
+            if i < first_add_i and f == -1:
+                c2 = stream_rgb_ch if parse_is_rgb else stream_ir_ch
+            elif f == -4:
+                c2 = stream_ir_ch if parse_is_rgb else stream_rgb_ch
+            else:
+                c2 = ch[f]
         elif m in {SKAttention,GLF,NAM,GLCBAM,GCBAM,SACBAM,CSFM}:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]
@@ -1173,6 +1184,21 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         if i == 0:
             ch = []
         ch.append(c2)
+        if i < first_add_i:
+            if f == -4:
+                if parse_is_rgb:
+                    stream_ir_ch = c2
+                    parse_is_rgb = False
+                else:
+                    stream_rgb_ch = c2
+                    parse_is_rgb = True
+            elif f == -3:
+                stream_rgb_ch = stream_ir_ch = c2
+            elif f == -1:
+                if parse_is_rgb:
+                    stream_rgb_ch = c2
+                else:
+                    stream_ir_ch = c2
         
     return nn.Sequential(*layers), sorted(save)
 
