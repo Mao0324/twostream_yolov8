@@ -216,7 +216,7 @@ class BaseModel(nn.Module):
                         x3=torch.cat([rgb,ir],dim=1)
                         x3=m(x3)
                         rgb,ir = torch.chunk(x3, 2, dim=1)
-                        x=[]#中间层
+                        x = [rgb, ir]  # 中间层
             elif m.i<dual_stream_until:
                 if isR:
                     x= m(rgb)
@@ -1066,7 +1066,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, args[0]]
         elif m is ADD:
 #            print("ch[f]", f, ch[f[0]])
-            c2 = ch[f[0]]
+            c2 = ch[f if isinstance(f, int) else f[0]]
             args = [c2]  
         elif m is ASSAAdd:
             c2 = ch[f[0]]
