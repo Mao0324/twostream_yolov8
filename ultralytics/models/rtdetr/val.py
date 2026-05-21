@@ -140,6 +140,18 @@ class RTDETRValidator(DetectionValidator):
 class RTDETRObbValidator(OBBValidator):
     """OBB validator with RT-DETR dataset settings."""
 
+    @staticmethod
+    def _scale_rboxes(rboxes, img_shape, ori_shape):
+        """Scale xywhr boxes from the square RT-DETR input shape to native image shape."""
+        if not len(rboxes):
+            return rboxes
+        img_h, img_w = img_shape
+        ori_h, ori_w = ori_shape[:2]
+        corners = ops.xywhr2xyxyxyxy(rboxes)
+        corners[..., 0] *= ori_w / img_w
+        corners[..., 1] *= ori_h / img_h
+        return ops.xyxyxyxy2xywhr(corners.reshape(-1, 8))
+
     def build_dataset(self, img_path, mode="val", batch=None):
         """Build an RT-DETR OBB dataset."""
         return RTDETRDataset(
@@ -154,3 +166,31 @@ class RTDETRObbValidator(OBBValidator):
             data=self.data,
             task="obb",
         )
+
+    def _prepare_batch(self, si, batch):
+        """Prepare RT-DETR OBB labels in native image space."""
+        idx = batch["batch_idx"] == si
+        cls = batch["cls"][idx].squeeze(-1)
+        bbox = batch["bboxes"][idx].clone()
+        ori_shape = batch["ori_shape"][si]
+        imgsz = batch["img"].shape[2:]
+        ratio_pad = batch["ratio_pad"][si]
+        if len(cls):
+            bbox[..., [0, 2]] *= imgsz[1]
+            bbox[..., [1, 3]] *= imgsz[0]
+            bbox = self._scale_rboxes(bbox, imgsz, ori_shape)
+        return {"cls": cls, "bbox": bbox, "ori_shape": ori_shape, "imgsz": imgsz, "ratio_pad": ratio_pad}
+
+    def _prepare_pred(self, pred, pbatch):
+        """Scale RT-DETR OBB predictions from normalized square input space to native image space."""
+        predn = pred.clone()
+        if len(predn):
+            predn[:, [0, 2]] *= pbatch["imgsz"][1]
+            predn[:, [1, 3]] *= pbatch["imgsz"][0]
+            rboxes = self._scale_rboxes(
+                torch.cat([predn[:, :4], predn[:, -1:]], dim=-1),
+                pbatch["imgsz"],
+                pbatch["ori_shape"],
+            )
+            predn = torch.cat([rboxes[:, :4], predn[:, 4:6], rboxes[:, -1:]], dim=-1)
+        return predn

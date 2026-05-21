@@ -90,7 +90,45 @@ class RTDETRPredictor(BasePredictor):
 class RTDETRObbPredictor(OBBPredictor):
     """RT-DETR OBB predictor using scale-filled RT-DETR preprocessing and rotated NMS."""
 
+    @staticmethod
+    def _scale_rboxes(rboxes, img_shape, ori_shape):
+        """Scale xywhr boxes from the square RT-DETR input shape to native image shape."""
+        if not len(rboxes):
+            return rboxes
+        img_h, img_w = img_shape
+        ori_h, ori_w = ori_shape[:2]
+        corners = ops.xywhr2xyxyxyxy(rboxes)
+        corners[..., 0] *= ori_w / img_w
+        corners[..., 1] *= ori_h / img_h
+        return ops.xyxyxyxy2xywhr(corners.reshape(-1, 8))
+
     def pre_transform(self, im):
         """Pre-transform images to square scale-filled inputs required by RT-DETR decoders."""
         letterbox = LetterBox(self.imgsz, auto=False, scaleFill=True)
         return [letterbox(image=x) for x in im]
+
+    def postprocess(self, preds, img, orig_imgs):
+        """Post-process normalized RT-DETR OBB predictions into native image-space results."""
+        preds = ops.non_max_suppression(
+            preds,
+            self.args.conf,
+            self.args.iou,
+            agnostic=self.args.agnostic_nms,
+            max_det=self.args.max_det,
+            nc=len(self.model.names),
+            classes=self.args.classes,
+            rotated=True,
+        )
+
+        if not isinstance(orig_imgs, list):
+            orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
+
+        results = []
+        for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
+            rboxes = ops.regularize_rboxes(torch.cat([pred[:, :4], pred[:, -1:]], dim=-1))
+            rboxes[:, [0, 2]] *= img.shape[3]
+            rboxes[:, [1, 3]] *= img.shape[2]
+            rboxes = self._scale_rboxes(rboxes, img.shape[2:], orig_img.shape)
+            obb = torch.cat([rboxes, pred[:, 4:6]], dim=-1)
+            results.append(Results(orig_img, path=img_path, names=self.model.names, obb=obb))
+        return results
