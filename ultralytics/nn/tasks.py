@@ -52,6 +52,7 @@ from ultralytics.nn.modules import (
     Concat2,
     ADD,
     ASSAAdd,
+    ASSAFusion,
     ASSARIFusion,
     ASSARefine,
     MISPA,

@@ -44,6 +44,7 @@ __all__ = (
     "LayerNorm2d",
     "SparseCrossChannelAttention2d",
     "ASSAAdd",
+    "ASSAFusion",
     "ASSARIFusion",
     "ASSARefine",
     "MISPA",
@@ -1731,6 +1732,9 @@ class ASSARIFusion(nn.Module):
         return torch.cat([rgb, ir], dim=1)
 
 
+ASSAFusion = ASSARIFusion
+
+
 class MISPA(nn.Module):
     """Modality-Invariant Structural Progressive Alignment for RGB/IR features.
 
@@ -3189,5 +3193,4 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
 
