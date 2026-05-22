@@ -7,7 +7,7 @@ Default paths match the user's requested locations:
 
 Usage:
   python make_twostream_obb_weights.py \
-      --target-yaml /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s.yaml
+      --target-yaml /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion_cw_postc2f.yaml
 """
 
 from __future__ import annotations
@@ -23,28 +23,30 @@ from ultralytics import YOLO
 
 
 DEFAULT_SOURCE = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
-DEFAULT_TARGET_YAML = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion_postc2f.yaml")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_TARGET_YAML = REPO_ROOT / "yaml/yolov8_twostream_obb_assafusion_cw_postc2f.yaml"
 DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt")
 
 # single-stream yolov8s(-obb) layer index -> two-stream RGB branch layer index
+# Mapping targets yaml/yolov8_twostream_obb_assafusion_cw_postc2f.yaml.
 SINGLE_TO_TWOSTREAM_RGB = {
     0: 0,
     1: 1,
     2: 2,
     3: 3,
     4: 8,
-    5: 13,
-    6: 15,
-    7: 20,
-    8: 22,
-    9: 24,
-    12: 34,
-    15: 37,
-    16: 38,
-    18: 40,
-    19: 41,
-    21: 43,
-    22: 44,
+    5: 11,
+    6: 13,
+    7: 16,
+    8: 18,
+    9: 20,
+    12: 28,
+    15: 31,
+    16: 32,
+    18: 34,
+    19: 35,
+    21: 37,
+    22: 38,
 }
 
 # two-stream RGB branch layer index -> two-stream IR branch layer index
@@ -54,11 +56,11 @@ TWOSTREAM_RGB_TO_IR = {
     2: 6,
     3: 7,
     8: 9,
+    11: 12,
     13: 14,
-    15: 16,
+    16: 17,
+    18: 19,
     20: 21,
-    22: 23,
-    24: 25,
 }
 
 
