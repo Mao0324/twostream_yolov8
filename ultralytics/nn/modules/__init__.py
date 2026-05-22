@@ -52,6 +52,7 @@ from .block import (
     ASSAAdd,
     ASSAFusion,
     ASSARIFusion,
+    ASSARIFusionCW,
     ASSARefine,
     MISPA,
     SimAM,
@@ -173,6 +174,7 @@ __all__ = (
     "ASSAAdd",
     "ASSAFusion",
     "ASSARIFusion",
+    "ASSARIFusionCW",
     "ASSARefine",
     "MISPA",
 )

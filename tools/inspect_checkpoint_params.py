@@ -37,6 +37,8 @@ def install_checkpoint_compat_aliases() -> None:
 
     if hasattr(block, "ASSARIFusion") and not hasattr(block, "ASSAFusion"):
         block.ASSAFusion = block.ASSARIFusion
+    if hasattr(block, "ASSARIFusion") and not hasattr(block, "ASSARIFusionCW"):
+        block.ASSARIFusionCW = block.ASSARIFusion
 
 
 def parse_args() -> argparse.Namespace:

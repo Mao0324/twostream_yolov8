@@ -46,6 +46,7 @@ __all__ = (
     "ASSAAdd",
     "ASSAFusion",
     "ASSARIFusion",
+    "ASSARIFusionCW",
     "ASSARefine",
     "MISPA",
     "SimAM",
@@ -1733,6 +1734,7 @@ class ASSARIFusion(nn.Module):
 
 
 ASSAFusion = ASSARIFusion
+ASSARIFusionCW = ASSARIFusion
 
 
 class MISPA(nn.Module):
@@ -3193,4 +3195,3 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-

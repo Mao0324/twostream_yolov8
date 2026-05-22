@@ -54,6 +54,7 @@ from ultralytics.nn.modules import (
     ASSAAdd,
     ASSAFusion,
     ASSARIFusion,
+    ASSARIFusionCW,
     ASSARefine,
     MISPA,
     ShuffleAttention,
