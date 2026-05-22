@@ -52,6 +52,7 @@ from .block import (
     ASSAAdd,
     ASSARIFusion,
     ASSARefine,
+    MISPA,
     SimAM,
     ShuffleAttention,
     GAM_Attention,
@@ -171,4 +172,5 @@ __all__ = (
     "ASSAAdd",
     "ASSARIFusion",
     "ASSARefine",
+    "MISPA",
 )

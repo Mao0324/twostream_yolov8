@@ -1,6 +1,8 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
 
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,6 +46,7 @@ __all__ = (
     "ASSAAdd",
     "ASSARIFusion",
     "ASSARefine",
+    "MISPA",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1726,6 +1729,107 @@ class ASSARIFusion(nn.Module):
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)
+
+
+class MISPA(nn.Module):
+    """Modality-Invariant Structural Progressive Alignment for RGB/IR features.
+
+    Input is a concatenated RGB/IR feature tensor [B, 2C, H, W]. RGB is treated
+    as the reference branch; the module extracts shared gradient-orientation
+    structure and predicts an IR->RGB offset before downstream fusion.
+    """
+
+    def __init__(self, c, reduction=8, max_shift=2.0, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.max_shift = float(max_shift)
+        hidden = max(8, c // reduction)
+
+        self.norm_rgb = LayerNorm2d(c)
+        self.norm_ir = LayerNorm2d(c)
+        self.reduce_rgb = nn.Sequential(nn.Conv2d(c, hidden, 1, bias=False), nn.BatchNorm2d(hidden), nn.SiLU())
+        self.reduce_ir = nn.Sequential(nn.Conv2d(c, hidden, 1, bias=False), nn.BatchNorm2d(hidden), nn.SiLU())
+
+        # Fixed Sobel kernels provide an explicit edge/orientation prior. The
+        # following learnable projection adapts that prior to feature space.
+        sobel_x = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]).view(1, 1, 3, 3)
+        self.register_buffer("sobel_x", sobel_x, persistent=False)
+        self.register_buffer("sobel_y", sobel_y, persistent=False)
+        self.structure_proj = nn.Sequential(
+            nn.Conv2d(3, hidden, 1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+            nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+        )
+
+        # Offset is initialized to zero so adding MISPA starts from the original
+        # two-stream behavior, then learns spatial correction during training.
+        self.offset_head = nn.Sequential(
+            nn.Conv2d(hidden * 5, hidden, 1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+            nn.Conv2d(hidden, 3, 3, padding=1),
+        )
+        nn.init.zeros_(self.offset_head[-1].weight)
+        nn.init.zeros_(self.offset_head[-1].bias)
+        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+        self.last_mean_shift = None
+        self.last_mean_conf = None
+
+    def _structure(self, x, norm):
+        """Extract gradient magnitude and local orientation cues from a feature map."""
+        gray = norm(x).mean(dim=1, keepdim=True)
+        gx = F.conv2d(gray, self.sobel_x.to(dtype=gray.dtype), padding=1)
+        gy = F.conv2d(gray, self.sobel_y.to(dtype=gray.dtype), padding=1)
+        mag = torch.sqrt(gx.pow(2) + gy.pow(2) + 1e-6)
+        return self.structure_proj(torch.cat([mag, gx, gy], dim=1))
+
+    @staticmethod
+    def _warp(x, offset):
+        """Warp feature map x by per-location offset measured in feature pixels."""
+        b, _, h, w = x.shape
+        if h <= 1 or w <= 1:
+            return x
+        ys = torch.linspace(-1.0, 1.0, h, device=x.device, dtype=x.dtype)
+        xs = torch.linspace(-1.0, 1.0, w, device=x.device, dtype=x.dtype)
+        with contextlib.suppress(TypeError):
+            yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+            grid = torch.stack((xx, yy), dim=-1).unsqueeze(0).repeat(b, 1, 1, 1)
+            dx = offset[:, 0] * (2.0 / max(w - 1, 1))
+            dy = offset[:, 1] * (2.0 / max(h - 1, 1))
+            grid = grid + torch.stack((dx, dy), dim=-1)
+            return F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=True)
+        yy, xx = torch.meshgrid(ys, xs)
+        grid = torch.stack((xx, yy), dim=-1).unsqueeze(0).repeat(b, 1, 1, 1)
+        dx = offset[:, 0] * (2.0 / max(w - 1, 1))
+        dy = offset[:, 1] * (2.0 / max(h - 1, 1))
+        grid = grid + torch.stack((dx, dy), dim=-1)
+        return F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=True)
+
+    def forward(self, x):
+        """Align IR feature to RGB reference and return [RGB, aligned IR]."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"MISPA expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        rgb_low = self.reduce_rgb(self.norm_rgb(rgb))
+        ir_low = self.reduce_ir(self.norm_ir(ir))
+        s_rgb = self._structure(rgb, self.norm_rgb)
+        s_ir = self._structure(ir, self.norm_ir)
+        s_diff = torch.abs(s_rgb - s_ir)
+
+        pred = self.offset_head(torch.cat([rgb_low, ir_low, s_rgb, s_ir, s_diff], dim=1))
+        offset = torch.tanh(pred[:, :2]) * self.max_shift
+        conf = torch.sigmoid(pred[:, 2:3])
+        ir_warped = self._warp(ir, offset * self.scale)
+        ir_aligned = conf * ir_warped + (1.0 - conf) * ir
+
+        self.last_mean_shift = offset.detach().pow(2).sum(dim=1).sqrt().mean()
+        self.last_mean_conf = conf.detach().mean()
+        return torch.cat([rgb, ir_aligned], dim=1)
 
 
 class ASSARefine(nn.Module):
