@@ -1740,9 +1740,9 @@ ASSARIFusionCW = ASSARIFusion
 class MISPA(nn.Module):
     """Modality-Invariant Structural Progressive Alignment for RGB/IR features.
 
-    Input is a concatenated RGB/IR feature tensor [B, 2C, H, W]. RGB is treated
-    as the reference branch; the module extracts shared gradient-orientation
-    structure and predicts an IR->RGB offset before downstream fusion.
+    Input is a concatenated RGB/IR feature tensor [B, 2C, H, W]. The module
+    extracts shared gradient-orientation structure and predicts bidirectional
+    soft alignment before downstream fusion.
     """
 
     def __init__(self, c, reduction=8, max_shift=2.0, init_scale=1e-3):
@@ -1771,9 +1771,15 @@ class MISPA(nn.Module):
             nn.SiLU(),
         )
 
-        # Offset is initialized to zero so adding MISPA starts from the original
-        # two-stream behavior, then learns spatial correction during training.
+        # Offsets are initialized to zero so adding MISPA starts from the
+        # original two-stream behavior, then learns spatial correction.
         self.offset_head = nn.Sequential(
+            nn.Conv2d(hidden * 5, hidden, 1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+            nn.Conv2d(hidden, 3, 3, padding=1),
+        )
+        self.rgb_offset_head = nn.Sequential(
             nn.Conv2d(hidden * 5, hidden, 1, bias=False),
             nn.BatchNorm2d(hidden),
             nn.SiLU(),
@@ -1781,9 +1787,16 @@ class MISPA(nn.Module):
         )
         nn.init.zeros_(self.offset_head[-1].weight)
         nn.init.zeros_(self.offset_head[-1].bias)
+        nn.init.zeros_(self.rgb_offset_head[-1].weight)
+        nn.init.zeros_(self.rgb_offset_head[-1].bias)
         self.scale = nn.Parameter(torch.ones(1) * init_scale)
+        self.rgb_scale = nn.Parameter(torch.ones(1) * init_scale)
         self.last_mean_shift = None
+        self.last_mean_rgb_shift = None
+        self.last_effective_shift = None
+        self.last_effective_rgb_shift = None
         self.last_mean_conf = None
+        self.last_mean_rgb_conf = None
 
     def _structure(self, x, norm):
         """Extract gradient magnitude and local orientation cues from a feature map."""
@@ -1816,7 +1829,7 @@ class MISPA(nn.Module):
         return F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=True)
 
     def forward(self, x):
-        """Align IR feature to RGB reference and return [RGB, aligned IR]."""
+        """Bidirectionally align RGB/IR features and return [aligned RGB, aligned IR]."""
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"MISPA expected {self.c} channels per stream, got {rgb.shape[1]}.")
@@ -1827,15 +1840,38 @@ class MISPA(nn.Module):
         s_ir = self._structure(ir, self.norm_ir)
         s_diff = torch.abs(s_rgb - s_ir)
 
-        pred = self.offset_head(torch.cat([rgb_low, ir_low, s_rgb, s_ir, s_diff], dim=1))
-        offset = torch.tanh(pred[:, :2]) * self.max_shift
-        conf = torch.sigmoid(pred[:, 2:3])
-        ir_warped = self._warp(ir, offset * self.scale)
-        ir_aligned = conf * ir_warped + (1.0 - conf) * ir
+        if not hasattr(self, "rgb_offset_head"):
+            pred = self.offset_head(torch.cat([rgb_low, ir_low, s_rgb, s_ir, s_diff], dim=1))
+            offset = torch.tanh(pred[:, :2]) * self.max_shift
+            conf = torch.sigmoid(pred[:, 2:3])
+            ir_warped = self._warp(ir, offset * self.scale)
+            ir_aligned = ir + conf * (ir_warped - ir)
 
-        self.last_mean_shift = offset.detach().pow(2).sum(dim=1).sqrt().mean()
-        self.last_mean_conf = conf.detach().mean()
-        return torch.cat([rgb, ir_aligned], dim=1)
+            self.last_mean_shift = offset.detach().pow(2).sum(dim=1).sqrt().mean()
+            self.last_effective_shift = self.last_mean_shift * self.scale.detach().abs()
+            self.last_mean_conf = conf.detach().mean()
+            return torch.cat([rgb, ir_aligned], dim=1)
+
+        ir_pred = self.offset_head(torch.cat([rgb_low, ir_low, s_rgb, s_ir, s_diff], dim=1))
+        rgb_pred = self.rgb_offset_head(torch.cat([ir_low, rgb_low, s_ir, s_rgb, s_diff], dim=1))
+
+        ir_offset = torch.tanh(ir_pred[:, :2]) * self.max_shift
+        rgb_offset = torch.tanh(rgb_pred[:, :2]) * self.max_shift
+        ir_conf = torch.sigmoid(ir_pred[:, 2:3])
+        rgb_conf = torch.sigmoid(rgb_pred[:, 2:3])
+
+        ir_warped = self._warp(ir, ir_offset * self.scale)
+        rgb_warped = self._warp(rgb, rgb_offset * self.rgb_scale)
+        ir_aligned = ir + ir_conf * (ir_warped - ir)
+        rgb_aligned = rgb + rgb_conf * (rgb_warped - rgb)
+
+        self.last_mean_shift = ir_offset.detach().pow(2).sum(dim=1).sqrt().mean()
+        self.last_mean_rgb_shift = rgb_offset.detach().pow(2).sum(dim=1).sqrt().mean()
+        self.last_effective_shift = self.last_mean_shift * self.scale.detach().abs()
+        self.last_effective_rgb_shift = self.last_mean_rgb_shift * self.rgb_scale.detach().abs()
+        self.last_mean_conf = ir_conf.detach().mean()
+        self.last_mean_rgb_conf = rgb_conf.detach().mean()
+        return torch.cat([rgb_aligned, ir_aligned], dim=1)
 
 
 class ASSARefine(nn.Module):
