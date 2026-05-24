@@ -1,4 +1,4 @@
-# 训练（DroneVehicle）
+# 训练：DroneVehicle
 from ultralytics import YOLO
 import ultralytics.nn.tasks  # noqa: F401
 
@@ -15,6 +15,6 @@ results = model.train(
     epochs=100,
     imgsz=640,
     device='5,6',
-    project="dronevehicle_runs_assafusion_c2f_mispa_bialign_fusion_conv",
+    project="dronevehicle_runs_assafusion_c2f_mispa_anchor_bicons_fusion_conv",
     task='obb'
 )

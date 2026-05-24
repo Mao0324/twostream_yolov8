@@ -1790,11 +1790,9 @@ class MISPA(nn.Module):
         nn.init.zeros_(self.rgb_offset_head[-1].weight)
         nn.init.zeros_(self.rgb_offset_head[-1].bias)
         self.scale = nn.Parameter(torch.ones(1) * init_scale)
-        self.rgb_scale = nn.Parameter(torch.ones(1) * init_scale)
         self.last_mean_shift = None
         self.last_mean_rgb_shift = None
         self.last_effective_shift = None
-        self.last_effective_rgb_shift = None
         self.last_mean_conf = None
         self.last_mean_rgb_conf = None
 
@@ -1829,7 +1827,7 @@ class MISPA(nn.Module):
         return F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=True)
 
     def forward(self, x):
-        """Bidirectionally align RGB/IR features and return [aligned RGB, aligned IR]."""
+        """Anchor RGB and align IR with a bidirectional consistency offset."""
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"MISPA expected {self.c} channels per stream, got {rgb.shape[1]}.")
@@ -1860,18 +1858,20 @@ class MISPA(nn.Module):
         ir_conf = torch.sigmoid(ir_pred[:, 2:3])
         rgb_conf = torch.sigmoid(rgb_pred[:, 2:3])
 
-        ir_warped = self._warp(ir, ir_offset * self.scale)
-        rgb_warped = self._warp(rgb, rgb_offset * self.rgb_scale)
-        ir_aligned = ir + ir_conf * (ir_warped - ir)
-        rgb_aligned = rgb + rgb_conf * (rgb_warped - rgb)
+        # RGB 分支保持为检测标签的几何锚点，不直接参与 warp。
+        # 反向 RGB->IR 预测只用于校验并修正 IR->RGB 偏移：方向一致时增强，
+        # 方向不一致时会被平均削弱，避免把 RGB 主分支带偏。
+        bi_offset = 0.5 * (ir_offset - rgb_offset)
+        bi_conf = 0.5 * (ir_conf + rgb_conf)
+        ir_warped = self._warp(ir, bi_offset * self.scale)
+        ir_aligned = ir + bi_conf * (ir_warped - ir)
 
-        self.last_mean_shift = ir_offset.detach().pow(2).sum(dim=1).sqrt().mean()
+        self.last_mean_shift = bi_offset.detach().pow(2).sum(dim=1).sqrt().mean()
         self.last_mean_rgb_shift = rgb_offset.detach().pow(2).sum(dim=1).sqrt().mean()
         self.last_effective_shift = self.last_mean_shift * self.scale.detach().abs()
-        self.last_effective_rgb_shift = self.last_mean_rgb_shift * self.rgb_scale.detach().abs()
-        self.last_mean_conf = ir_conf.detach().mean()
+        self.last_mean_conf = bi_conf.detach().mean()
         self.last_mean_rgb_conf = rgb_conf.detach().mean()
-        return torch.cat([rgb_aligned, ir_aligned], dim=1)
+        return torch.cat([rgb, ir_aligned], dim=1)
 
 
 class ASSARefine(nn.Module):
