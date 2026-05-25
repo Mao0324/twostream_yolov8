@@ -1884,14 +1884,17 @@ class MISPA(nn.Module):
             align_loss = F.l1_loss(s_ir_warped, s_rgb_ref)
             smooth_loss = self._smoothness(effective_offset)
             mag_loss = effective_offset.abs().mean()
-            self.mispa_aux_loss = (
-                self.align_weight * align_loss + self.smooth_weight * smooth_loss + self.mag_weight * mag_loss
-            )
+            aux_loss = self.align_weight * align_loss + self.smooth_weight * smooth_loss + self.mag_weight * mag_loss
+            # 不把带计算图的aux_loss挂到模块属性上；EMA/deepcopy会复制模块属性，
+            # PyTorch不能deepcopy非leaf tensor。真正反传用的loss由BaseModel前向结束后收集。
+            self._mispa_aux_loss_for_forward = aux_loss
+            self.mispa_aux_loss = aux_loss.detach()
             self.last_align_loss = align_loss.detach()
             self.last_smooth_loss = smooth_loss.detach()
             self.last_mag_loss = mag_loss.detach()
         else:
-            self.mispa_aux_loss = ir.sum() * 0.0
+            self._mispa_aux_loss_for_forward = None
+            self.mispa_aux_loss = None
             self.last_align_loss = None
             self.last_smooth_loss = None
             self.last_mag_loss = None

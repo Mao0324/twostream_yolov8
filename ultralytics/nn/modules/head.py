@@ -140,7 +140,9 @@ class OBB(Detect):
         angle = (angle.sigmoid() - 0.25) * math.pi  # [-pi/4, 3pi/4]
         # angle = angle.sigmoid() * math.pi / 2  # [0, pi/2]
         if not self.training:
-            self.angle = angle
+            # 推理/stride推断时仅作为decode_bboxes缓存使用，不能保留带计算图的tensor，
+            # 否则EMA或保存权重时deepcopy(model)会失败。
+            self.angle = angle.detach()
         x = self.detect(self, x)
         if self.training:
             return x, angle

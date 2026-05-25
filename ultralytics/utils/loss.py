@@ -187,12 +187,10 @@ class v8DetectionLoss:
 
     def mispa_aux_loss(self):
         """Collect structure-alignment auxiliary losses produced by MISPA modules."""
-        aux = torch.zeros((), device=self.device)
-        for module in self.model.modules():
-            loss = getattr(module, "mispa_aux_loss", None)
-            if torch.is_tensor(loss):
-                aux = aux + loss.to(self.device)
-        return aux
+        loss = getattr(self, "current_mispa_aux_loss", None)
+        if torch.is_tensor(loss):
+            return loss.to(self.device)
+        return torch.zeros((), device=self.device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""

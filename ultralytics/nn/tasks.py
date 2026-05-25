@@ -156,6 +156,7 @@ class BaseModel(nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt, embeddings = [], [], []  # outputs
+        self.mispa_aux_loss = None
         rgb,ir=torch.chunk(x,chunks=2,dim=1) # 红外
         # rgb=x[:, :3, :, :] # 可见光
         x=rgb
@@ -359,6 +360,17 @@ class BaseModel(nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights")
 
+    def _pop_mispa_aux_loss(self, device):
+        """Collect MISPA auxiliary losses from the last forward and clear graph tensors before EMA/deepcopy."""
+        aux_losses = []
+        for module in self.model:
+            aux = getattr(module, "_mispa_aux_loss_for_forward", None)
+            if torch.is_tensor(aux):
+                aux_losses.append(aux.to(device))
+            if hasattr(module, "_mispa_aux_loss_for_forward"):
+                module._mispa_aux_loss_for_forward = None
+        return torch.stack(aux_losses).sum() if aux_losses else torch.zeros((), device=device)
+
     def loss(self, batch, preds=None):
         """
         Compute loss.
@@ -371,7 +383,10 @@ class BaseModel(nn.Module):
             self.criterion = self.init_criterion()
 
         preds = self.forward(batch["img"]) if preds is None else preds
-        return self.criterion(preds, batch)
+        self.criterion.current_mispa_aux_loss = self._pop_mispa_aux_loss(batch["img"].device)
+        loss = self.criterion(preds, batch)
+        self.criterion.current_mispa_aux_loss = None
+        return loss
 
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
@@ -740,6 +755,15 @@ class WorldModel(DetectionModel):
                 embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max(embed):
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        aux_losses = []
+        for module in self.model:
+            aux = getattr(module, "_mispa_aux_loss_for_forward", None)
+            if torch.is_tensor(aux):
+                aux_losses.append(aux)
+            if hasattr(module, "_mispa_aux_loss_for_forward"):
+                module._mispa_aux_loss_for_forward = None
+        if aux_losses:
+            self.mispa_aux_loss = torch.stack(aux_losses).sum()
         return x
 
     def loss(self, batch, preds=None):

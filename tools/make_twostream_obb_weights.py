@@ -116,6 +116,7 @@ def _clear_runtime_tensors(model: torch.nn.Module) -> None:
         "last_align_loss",
         "last_smooth_loss",
         "last_mag_loss",
+        "_mispa_aux_loss_for_forward",
         "last_mean_rgb_shift",
         "last_effective_rgb_shift",
         "last_mean_rgb_conf",
