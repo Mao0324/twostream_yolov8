@@ -99,6 +99,33 @@ def _copy_with_layer_map(src_sd: dict, dst_sd: dict, layer_map: dict[int, int], 
     return copied, miss, mismatch
 
 
+def _clear_runtime_tensors(model: torch.nn.Module) -> None:
+    """Remove non-parameter tensors cached during model building before deepcopy/save.
+
+    MISPA stores diagnostic tensors such as last_mean_shift and mispa_aux_loss
+    during the dummy forward used by YOLO to infer strides. Those tensors may
+    keep autograd history and PyTorch cannot deepcopy non-leaf tensors. They are
+    runtime-only diagnostics, not checkpoint state, so they must be cleared
+    before serializing the model.
+    """
+    runtime_attrs = (
+        "mispa_aux_loss",
+        "last_mean_shift",
+        "last_effective_shift",
+        "last_mean_conf",
+        "last_align_loss",
+        "last_smooth_loss",
+        "last_mag_loss",
+        "last_mean_rgb_shift",
+        "last_effective_rgb_shift",
+        "last_mean_rgb_conf",
+    )
+    for module in model.modules():
+        for attr in runtime_attrs:
+            if hasattr(module, attr):
+                setattr(module, attr, None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build two-stream OBB checkpoint from single-stream OBB checkpoint.")
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="Single-stream .pt checkpoint path.")
@@ -137,6 +164,7 @@ def main() -> int:
     missing_keys, unexpected_keys = two.model.load_state_dict(dst_sd, strict=False)
     print(f"[load_state_dict] missing_keys={len(missing_keys)}, unexpected_keys={len(unexpected_keys)}")
 
+    _clear_runtime_tensors(two.model)
     ckpt = {
         "date": datetime.now().isoformat(),
         "version": ultralytics.__version__,
