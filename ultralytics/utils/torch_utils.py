@@ -391,6 +391,28 @@ def copy_attr(a, b, include=(), exclude=()):
             setattr(a, k, v)
 
 
+def strip_nonleaf_tensor_attrs(model):
+    """Clear runtime tensor attributes that would make deepcopy(model) fail.
+
+    Some modules cache intermediate tensors for decoding or diagnostics, e.g.
+    OBB.angle or MISPA alignment statistics. If such tensors still carry a
+    computation graph, PyTorch refuses to deepcopy the model when EMA is built.
+    Parameters and registered buffers live in ``_parameters``/``_buffers`` and
+    are not touched here.
+    """
+    cleared = 0
+    for module in model.modules():
+        for name, value in list(vars(module).items()):
+            if torch.is_tensor(value) and value.grad_fn is not None:
+                setattr(module, name, None)
+                cleared += 1
+    for name, value in list(vars(model).items()):
+        if torch.is_tensor(value) and value.grad_fn is not None:
+            setattr(model, name, None)
+            cleared += 1
+    return cleared
+
+
 def get_latest_opset():
     """Return second-most (for maturity) recently supported ONNX opset by this version of torch."""
     
@@ -447,7 +469,9 @@ class ModelEMA:
 
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         """Create EMA."""
-        self.ema = deepcopy(de_parallel(model)).eval()  # FP32 EMA
+        model = de_parallel(model)
+        strip_nonleaf_tensor_attrs(model)
+        self.ema = deepcopy(model).eval()  # FP32 EMA
         self.updates = updates  # number of EMA updates
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp (to help early epochs)
         for p in self.ema.parameters():
