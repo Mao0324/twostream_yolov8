@@ -1685,6 +1685,27 @@ class SparseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class LightweightGatedFFN(nn.Module):
+    """Lightweight gated feed-forward refinement for NCHW feature maps."""
+
+    def __init__(self, c):
+        super().__init__()
+        hidden = c * 2
+        self.norm = LayerNorm2d(c)
+        # 轻量化 GFN：只扩展到 2C，避免复原任务中 4C 扩展带来的检测开销。
+        self.fc1 = nn.Conv2d(c, hidden, 1, bias=False)
+        # 深度卷积补充局部上下文，保持参数量和计算量可控。
+        self.dwconv = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
+        self.fc2 = nn.Conv2d(c, c, 1, bias=False)
+
+    def forward(self, x):
+        y = self.fc1(self.norm(x))
+        y = self.dwconv(y)
+        y1, y2 = torch.chunk(y, chunks=2, dim=1)
+        # 门控分支参考论文 GFN 思路，用 GELU 激活抑制冗余局部响应。
+        return self.fc2(y1 * F.gelu(y2))
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1715,6 +1736,10 @@ class ASSARIFusion(nn.Module):
         self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
         self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
         self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+        # RGB/IR 共享同一个轻量 Gated FFN，减少参数并约束两路特征使用一致的局部细化方式。
+        self.ffn = LightweightGatedFFN(c)
+        self.ffn_scale_rgb = nn.Parameter(torch.ones(1) * 1e-3)
+        self.ffn_scale_ir = nn.Parameter(torch.ones(1) * 1e-3)
 
     def forward(self, x):
         """Fuse concatenated RGB/IR feature tensor."""
@@ -1725,6 +1750,9 @@ class ASSARIFusion(nn.Module):
         delta_ir = self.xattn(ir, rgb)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
+        # 在跨模态稀疏注意力之后做单模态局部门控细化，使用小残差系数保证训练初期稳定。
+        rgb = rgb + self.ffn_scale_rgb * self.ffn(rgb)
+        ir = ir + self.ffn_scale_ir * self.ffn(ir)
         return torch.cat([rgb, ir], dim=1)
 
 
