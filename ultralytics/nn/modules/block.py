@@ -1740,15 +1740,28 @@ ASSARIFusionCW = ASSARIFusion
 class MISPA(nn.Module):
     """Modality-Invariant Structural Progressive Alignment for RGB/IR features.
 
-    Input is a concatenated RGB/IR feature tensor [B, 2C, H, W]. The module
-    extracts shared gradient-orientation structure and predicts bidirectional
-    soft alignment before downstream fusion.
+    Input is a concatenated RGB/IR feature tensor [B, 2C, H, W]. RGB is kept as
+    the geometric reference branch; only the IR feature is softly aligned to RGB
+    before downstream fusion.
     """
 
-    def __init__(self, c, reduction=8, max_shift=2.0, init_scale=1e-3):
+    def __init__(
+        self,
+        c,
+        reduction=8,
+        max_shift=2.0,
+        init_scale=1e-2,
+        align_weight=0.05,
+        smooth_weight=0.005,
+        mag_weight=0.001,
+        conf_bias=-2.0,
+    ):
         super().__init__()
         self.c = c
         self.max_shift = float(max_shift)
+        self.align_weight = float(align_weight)
+        self.smooth_weight = float(smooth_weight)
+        self.mag_weight = float(mag_weight)
         hidden = max(8, c // reduction)
 
         self.norm_rgb = LayerNorm2d(c)
@@ -1779,30 +1792,34 @@ class MISPA(nn.Module):
             nn.SiLU(),
             nn.Conv2d(hidden, 3, 3, padding=1),
         )
-        self.rgb_offset_head = nn.Sequential(
-            nn.Conv2d(hidden * 5, hidden, 1, bias=False),
-            nn.BatchNorm2d(hidden),
-            nn.SiLU(),
-            nn.Conv2d(hidden, 3, 3, padding=1),
-        )
         nn.init.zeros_(self.offset_head[-1].weight)
         nn.init.zeros_(self.offset_head[-1].bias)
-        nn.init.zeros_(self.rgb_offset_head[-1].weight)
-        nn.init.zeros_(self.rgb_offset_head[-1].bias)
+        # 初始置信度设置得较低，避免训练一开始就在已对齐样本上做强制 warp。
+        with torch.no_grad():
+            self.offset_head[-1].bias[2].fill_(float(conf_bias))
         self.scale = nn.Parameter(torch.ones(1) * init_scale)
         self.last_mean_shift = None
-        self.last_mean_rgb_shift = None
         self.last_effective_shift = None
         self.last_mean_conf = None
-        self.last_mean_rgb_conf = None
+        self.mispa_aux_loss = None
+        self.last_align_loss = None
+        self.last_smooth_loss = None
+        self.last_mag_loss = None
 
-    def _structure(self, x, norm):
-        """Extract gradient magnitude and local orientation cues from a feature map."""
+    def _structure_raw(self, x, norm):
+        """Extract normalized Sobel magnitude and orientation cues for alignment supervision."""
         gray = norm(x).mean(dim=1, keepdim=True)
         gx = F.conv2d(gray, self.sobel_x.to(dtype=gray.dtype), padding=1)
         gy = F.conv2d(gray, self.sobel_y.to(dtype=gray.dtype), padding=1)
         mag = torch.sqrt(gx.pow(2) + gy.pow(2) + 1e-6)
-        return self.structure_proj(torch.cat([mag, gx, gy], dim=1))
+        structure = torch.cat([mag, gx, gy], dim=1)
+        mean = structure.mean(dim=(2, 3), keepdim=True)
+        std = structure.std(dim=(2, 3), keepdim=True).clamp_min(1e-6)
+        return (structure - mean) / std
+
+    def _structure(self, x, norm):
+        """Project raw gradient-orientation cues into a compact learnable structure prior."""
+        return self.structure_proj(self._structure_raw(x, norm))
 
     @staticmethod
     def _warp(x, offset):
@@ -1826,51 +1843,62 @@ class MISPA(nn.Module):
         grid = grid + torch.stack((dx, dy), dim=-1)
         return F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=True)
 
+    @staticmethod
+    def _smoothness(offset):
+        """Encourage neighboring offsets to vary smoothly, reducing noisy local warps."""
+        if offset.shape[-1] <= 1 or offset.shape[-2] <= 1:
+            return offset.new_zeros(())
+        dx = (offset[:, :, :, 1:] - offset[:, :, :, :-1]).abs().mean()
+        dy = (offset[:, :, 1:, :] - offset[:, :, :-1, :]).abs().mean()
+        return dx + dy
+
     def forward(self, x):
-        """Anchor RGB and align IR with a bidirectional consistency offset."""
+        """Conservatively align IR to RGB and return [RGB, aligned IR]."""
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"MISPA expected {self.c} channels per stream, got {rgb.shape[1]}.")
 
         rgb_low = self.reduce_rgb(self.norm_rgb(rgb))
         ir_low = self.reduce_ir(self.norm_ir(ir))
-        s_rgb = self._structure(rgb, self.norm_rgb)
-        s_ir = self._structure(ir, self.norm_ir)
+        raw_s_rgb = self._structure_raw(rgb, self.norm_rgb)
+        raw_s_ir = self._structure_raw(ir, self.norm_ir)
+        s_rgb = self.structure_proj(raw_s_rgb)
+        s_ir = self.structure_proj(raw_s_ir)
         s_diff = torch.abs(s_rgb - s_ir)
 
-        if not hasattr(self, "rgb_offset_head"):
-            pred = self.offset_head(torch.cat([rgb_low, ir_low, s_rgb, s_ir, s_diff], dim=1))
-            offset = torch.tanh(pred[:, :2]) * self.max_shift
-            conf = torch.sigmoid(pred[:, 2:3])
-            ir_warped = self._warp(ir, offset * self.scale)
-            ir_aligned = ir + conf * (ir_warped - ir)
+        pred = self.offset_head(torch.cat([rgb_low, ir_low, s_rgb, s_ir, s_diff], dim=1))
+        ir_offset = torch.tanh(pred[:, :2]) * self.max_shift
+        ir_conf = torch.sigmoid(pred[:, 2:3])
+        effective_offset = ir_offset * self.scale
 
-            self.last_mean_shift = offset.detach().pow(2).sum(dim=1).sqrt().mean()
-            self.last_effective_shift = self.last_mean_shift * self.scale.detach().abs()
-            self.last_mean_conf = conf.detach().mean()
-            return torch.cat([rgb, ir_aligned], dim=1)
+        # RGB 分支不做 warp，保持检测标签所在坐标系的几何锚点；只把 IR 特征轻量拉向 RGB。
+        ir_warped = self._warp(ir, effective_offset)
+        ir_aligned = ir + ir_conf * (ir_warped - ir)
 
-        ir_pred = self.offset_head(torch.cat([rgb_low, ir_low, s_rgb, s_ir, s_diff], dim=1))
-        rgb_pred = self.rgb_offset_head(torch.cat([ir_low, rgb_low, s_ir, s_rgb, s_diff], dim=1))
+        # 结构一致性辅助损失只约束 offset 的学习，不直接强迫两路主干特征变成一样。
+        # detach 后仍然能通过 grid_sample 的采样网格把梯度传给 offset 预测分支。
+        if self.training and self.align_weight > 0:
+            s_rgb_ref = raw_s_rgb.detach()
+            s_ir_ref = raw_s_ir.detach()
+            s_ir_warped = self._warp(s_ir_ref, effective_offset)
+            align_loss = F.l1_loss(s_ir_warped, s_rgb_ref)
+            smooth_loss = self._smoothness(effective_offset)
+            mag_loss = effective_offset.abs().mean()
+            self.mispa_aux_loss = (
+                self.align_weight * align_loss + self.smooth_weight * smooth_loss + self.mag_weight * mag_loss
+            )
+            self.last_align_loss = align_loss.detach()
+            self.last_smooth_loss = smooth_loss.detach()
+            self.last_mag_loss = mag_loss.detach()
+        else:
+            self.mispa_aux_loss = ir.sum() * 0.0
+            self.last_align_loss = None
+            self.last_smooth_loss = None
+            self.last_mag_loss = None
 
-        ir_offset = torch.tanh(ir_pred[:, :2]) * self.max_shift
-        rgb_offset = torch.tanh(rgb_pred[:, :2]) * self.max_shift
-        ir_conf = torch.sigmoid(ir_pred[:, 2:3])
-        rgb_conf = torch.sigmoid(rgb_pred[:, 2:3])
-
-        # RGB 分支保持为检测标签的几何锚点，不直接参与 warp。
-        # 反向 RGB->IR 预测只用于校验并修正 IR->RGB 偏移：方向一致时增强，
-        # 方向不一致时会被平均削弱，避免把 RGB 主分支带偏。
-        bi_offset = 0.5 * (ir_offset - rgb_offset)
-        bi_conf = 0.5 * (ir_conf + rgb_conf)
-        ir_warped = self._warp(ir, bi_offset * self.scale)
-        ir_aligned = ir + bi_conf * (ir_warped - ir)
-
-        self.last_mean_shift = bi_offset.detach().pow(2).sum(dim=1).sqrt().mean()
-        self.last_mean_rgb_shift = rgb_offset.detach().pow(2).sum(dim=1).sqrt().mean()
+        self.last_mean_shift = ir_offset.detach().pow(2).sum(dim=1).sqrt().mean()
         self.last_effective_shift = self.last_mean_shift * self.scale.detach().abs()
-        self.last_mean_conf = bi_conf.detach().mean()
-        self.last_mean_rgb_conf = rgb_conf.detach().mean()
+        self.last_mean_conf = ir_conf.detach().mean()
         return torch.cat([rgb, ir_aligned], dim=1)
 
 

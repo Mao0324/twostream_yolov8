@@ -30,7 +30,7 @@ from ultralytics import YOLO
 
 DEFAULT_SOURCE = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
 DEFAULT_TARGET_YAML = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_mispa.yaml")
-DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream_mispa.pt")
+DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream_mispa_p3_ironly.pt")
 
 # single-stream yolov8s(-obb) layer index -> MISPA two-stream RGB/shared layer index
 SINGLE_TO_TWOSTREAM_RGB = {
@@ -41,16 +41,16 @@ SINGLE_TO_TWOSTREAM_RGB = {
     4: 8,
     5: 12,
     6: 14,
-    7: 18,
-    8: 20,
-    9: 22,
-    12: 31,
-    15: 34,
-    16: 35,
-    18: 37,
-    19: 38,
-    21: 40,
-    22: 41,
+    7: 17,
+    8: 19,
+    9: 21,
+    12: 29,
+    15: 32,
+    16: 33,
+    18: 35,
+    19: 36,
+    21: 38,
+    22: 39,
 }
 
 # MISPA two-stream RGB branch layer index -> MISPA two-stream IR branch layer index
@@ -62,9 +62,9 @@ TWOSTREAM_RGB_TO_IR = {
     8: 9,
     12: 13,
     14: 15,
-    18: 19,
-    20: 21,
-    22: 23,
+    17: 18,
+    19: 20,
+    21: 22,
 }
 
 
