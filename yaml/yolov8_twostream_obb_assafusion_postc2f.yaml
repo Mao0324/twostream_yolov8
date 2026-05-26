@@ -23,13 +23,13 @@ backbone:
 
   - [-4, 6, C2f, [256, True]] # 8 P3/8 RGB
   - [-4, 6, C2f_Faster, [256, True]] # 9 P3/8 IR
-  - [-3, 1, ASSARIFusion, [256, 8, 4, True,0.01]] # 10 P3/8 fusion after C2f
+  - [-3, 1, ASSARIFusion, [256, 8, 4, True]] # 10 P3/8 fusion after C2f
   - [-4, 1, Conv, [512, 3, 2]] # 11-P4/16 RGB
   - [-4, 1, Conv, [512, 3, 2]] # 12-P4/16 IR
 
   - [-4, 6, C2f, [512, True]] # 13 P4/16 RGB
   - [-4, 6, C2f_Faster, [512, True]] # 14 P4/16 IR
-  - [-3, 1, ASSARIFusion, [512, 8, 4, True,0.01]] # 15 P4/16 fusion after C2f
+  - [-3, 1, ASSARIFusion, [512, 8, 4, True]] # 15 P4/16 fusion after C2f
   - [-4, 1, Conv, [1024, 3, 2]] # 16-P5/32 RGB
   - [-4, 1, Conv, [1024, 3, 2]] # 17-P5/32 IR
 
@@ -37,7 +37,7 @@ backbone:
   - [-4, 3, C2f_Faster, [1024, True]] # 19 P5/32 IR
   - [-4, 1, SPPF, [1024, 5]] # 20 P5/32 RGB
   - [-4, 1, SPPF, [1024, 5]] # 21 P5/32 IR
-  - [-3, 1, ASSARIFusion, [1024, 8, 4, True,0.01]] # 22 P5/32 fusion after SPPF
+  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]] # 22 P5/32 fusion after SPPF
 
   - [10, 1, ADD, [1]] # 23 P3 to FPN
   - [15, 1, ADD, [1]] # 24 P4 to FPN
