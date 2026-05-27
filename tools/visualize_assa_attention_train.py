@@ -21,7 +21,7 @@ import numpy as np
 import yaml
 
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--save-dir", type=str, default=str(repo_root / "vis" / "assa_attention_train"), help="Output dir")
     parser.add_argument("--conf", type=float, default=0.001, help="Low conf keeps inference path active; boxes are not used")
+    parser.add_argument("--max-scan", type=int, default=5000, help="Maximum RGB files to scan before sampling")
     return parser.parse_args()
 
 
@@ -112,16 +113,42 @@ def attention_stats(attn: np.ndarray) -> tuple[float, float, float]:
     return sparsity, top1, entropy
 
 
-def collect_image_pairs(rgb_dir: Path, ir_dir: Path) -> list[tuple[Path, Path]]:
-    rgb_paths = sorted(p for p in rgb_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
-    ir_by_stem = {
-        p.stem: p
-        for p in sorted(ir_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-    }
+def find_ir_pair(ir_dir: Path, stem: str) -> Path | None:
+    for suffix in IMAGE_EXTS:
+        candidate = ir_dir / f"{stem}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
 
-    # DroneVehicle 双流目录中 RGB 常为 .jpg，IR 常为 .png，因此按 stem 配对而不是按完整文件名配对。
-    return [(rgb_path, ir_by_stem[rgb_path.stem]) for rgb_path in rgb_paths if rgb_path.stem in ir_by_stem]
+
+def collect_image_pairs(rgb_dir: Path, ir_dir: Path, num_samples: int, seed: int, max_scan: int) -> list[tuple[Path, Path]]:
+    rng = random.Random(seed)
+    pairs: list[tuple[Path, Path]] = []
+    seen_pairs = 0
+    scanned = 0
+
+    for rgb_path in rgb_dir.iterdir():
+        if max_scan > 0 and scanned >= max_scan:
+            break
+        if not rgb_path.is_file() or rgb_path.suffix.lower() not in IMAGE_EXTS:
+            continue
+
+        scanned += 1
+        ir_path = find_ir_pair(ir_dir, rgb_path.stem)
+        if ir_path is None:
+            continue
+
+        # 使用 reservoir sampling，只扫描前 max_scan 个 RGB 文件，不需要遍历完整训练集。
+        seen_pairs += 1
+        if len(pairs) < num_samples:
+            pairs.append((rgb_path, ir_path))
+        else:
+            replace_idx = rng.randrange(seen_pairs)
+            if replace_idx < num_samples:
+                pairs[replace_idx] = (rgb_path, ir_path)
+
+    print(f"[INFO] scanned_rgb={scanned}, paired={seen_pairs}, selected={len(pairs)}")
+    return pairs
 
 
 def main() -> int:
@@ -131,6 +158,8 @@ def main() -> int:
     # 延迟导入 torch/ultralytics，方便在没有深度学习环境时仍可查看脚本参数。
     from ultralytics import YOLO
     import ultralytics.nn.tasks  # noqa: F401
+    import torch
+    import torch.nn.functional as F
     from ultralytics.nn.modules.block import SparseCrossChannelAttention2d
 
     data_yaml = Path(args.data).resolve()
@@ -140,10 +169,10 @@ def main() -> int:
     if not ir_dir.exists():
         raise FileNotFoundError(f"IR directory not found: {ir_dir}")
 
-    candidates = collect_image_pairs(rgb_dir, ir_dir)
+    candidates = collect_image_pairs(rgb_dir, ir_dir, args.num_samples, args.seed, args.max_scan)
     if not candidates:
-        raise RuntimeError(f"No paired images found by filename stem in {rgb_dir} and {ir_dir}")
-    chosen = random.sample(candidates, k=min(args.num_samples, len(candidates)))
+        raise RuntimeError(f"No paired images found by filename stem in first {args.max_scan} RGB files of {rgb_dir}")
+    chosen = candidates
 
     save_dir = Path(args.save_dir).resolve()
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -155,12 +184,44 @@ def main() -> int:
     model = YOLO(args.weights)
     records: list[tuple[str, np.ndarray, float]] = []
 
+    def patch_attention_capture(module: SparseCrossChannelAttention2d) -> None:
+        if hasattr(module, "last_attn"):
+            return
+
+        module.last_attn = None
+        module.last_sparsity = None
+
+        def forward_with_capture(self, src, ref):
+            b, _, h, w = src.shape
+            q = self.q_proj(self.norm_src(src))
+            q = q + self.q_dw(q)
+            kv = self.kv_proj(self.norm_ref(ref))
+            kv = kv + self.kv_dw(kv)
+
+            q = q.reshape(b, self.heads, self.dim, h * w)
+            v = kv.reshape(b, self.heads, self.dim, h * w)
+            k = F.normalize(v, dim=-1)
+            q = F.normalize(q, dim=-1)
+
+            attn = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
+            attn = F.relu(attn)
+            if self.norm_attn:
+                attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+            self.last_sparsity = (attn <= 1e-6).float().mean().detach()
+            self.last_attn = attn.detach()
+
+            out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
+            return self.out_proj(out)
+
+        # 兼容旧代码训练出的模型：旧模块没有 last_attn，这里只在可视化时替换 forward 以捕获注意力矩阵。
+        module.forward = forward_with_capture.__get__(module, module.__class__)
+
     def make_hook(name: str):
         def hook(module, _inputs, _output):
-            if module.last_attn is None:
+            if not hasattr(module, "last_attn") or module.last_attn is None:
                 return
             attn = module.last_attn[0].detach().float().cpu().numpy()
-            sparsity = float(module.last_sparsity.detach().float().cpu().item())
+            sparsity = float(module.last_sparsity.detach().float().cpu().item()) if module.last_sparsity is not None else 0.0
             records.append((name, attn, sparsity))
 
         return hook
@@ -168,7 +229,12 @@ def main() -> int:
     handles = []
     for name, module in model.model.named_modules():
         if isinstance(module, SparseCrossChannelAttention2d):
+            patch_attention_capture(module)
             handles.append(module.register_forward_hook(make_hook(name)))
+
+    expected_records = len(handles) * 2
+    if expected_records == 0:
+        raise RuntimeError("No SparseCrossChannelAttention2d modules found in model.")
 
     summary_rows = []
     directions = ("IR->RGB", "RGB->IR")
@@ -183,11 +249,12 @@ def main() -> int:
             records.clear()
             two_stream = np.concatenate([rgb, ir], axis=2)
             model.predict(source=two_stream, imgsz=args.imgsz, conf=args.conf, device=args.device, verbose=False)
+            image_records = records[-expected_records:]
 
             header = hstack_same_height([resize_with_title(rgb, "RGB"), resize_with_title(ir, "IR")])
             heatmaps = []
             per_layer_count: dict[str, int] = {}
-            for module_name, attn, relu_sparsity in records:
+            for module_name, attn, relu_sparsity in image_records:
                 layer_name = module_name.split(".")[1] if module_name.startswith("model.") else module_name
                 call_idx = per_layer_count.get(layer_name, 0)
                 per_layer_count[layer_name] = call_idx + 1
