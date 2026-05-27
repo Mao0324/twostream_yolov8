@@ -1683,6 +1683,7 @@ class SparseCrossChannelAttention2d(nn.Module):
         self.dim = hidden // heads
         self.norm_attn = norm_attn
         self.last_sparsity = None
+        self.last_attn = None
 
         self.norm_src = LayerNorm2d(c)
         self.norm_ref = LayerNorm2d(c)
@@ -1712,6 +1713,7 @@ class SparseCrossChannelAttention2d(nn.Module):
         if self.norm_attn:
             attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
         self.last_sparsity = (attn <= 1e-6).float().mean().detach()
+        self.last_attn = attn.detach()
 
         out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
         return self.out_proj(out)
