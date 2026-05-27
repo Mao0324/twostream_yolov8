@@ -112,9 +112,16 @@ def attention_stats(attn: np.ndarray) -> tuple[float, float, float]:
     return sparsity, top1, entropy
 
 
-def collect_rgb_paths(rgb_dir: Path, ir_dir: Path) -> list[Path]:
+def collect_image_pairs(rgb_dir: Path, ir_dir: Path) -> list[tuple[Path, Path]]:
     rgb_paths = sorted(p for p in rgb_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
-    return [p for p in rgb_paths if (ir_dir / p.name).exists()]
+    ir_by_stem = {
+        p.stem: p
+        for p in sorted(ir_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    }
+
+    # DroneVehicle 双流目录中 RGB 常为 .jpg，IR 常为 .png，因此按 stem 配对而不是按完整文件名配对。
+    return [(rgb_path, ir_by_stem[rgb_path.stem]) for rgb_path in rgb_paths if rgb_path.stem in ir_by_stem]
 
 
 def main() -> int:
@@ -133,14 +140,17 @@ def main() -> int:
     if not ir_dir.exists():
         raise FileNotFoundError(f"IR directory not found: {ir_dir}")
 
-    candidates = collect_rgb_paths(rgb_dir, ir_dir)
+    candidates = collect_image_pairs(rgb_dir, ir_dir)
     if not candidates:
-        raise RuntimeError(f"No paired images found in {rgb_dir} and {ir_dir}")
+        raise RuntimeError(f"No paired images found by filename stem in {rgb_dir} and {ir_dir}")
     chosen = random.sample(candidates, k=min(args.num_samples, len(candidates)))
 
     save_dir = Path(args.save_dir).resolve()
     save_dir.mkdir(parents=True, exist_ok=True)
-    (save_dir / "selected_pairs.txt").write_text("\n".join(str(p) for p in chosen), encoding="utf-8")
+    (save_dir / "selected_pairs.txt").write_text(
+        "\n".join(f"{rgb_path}\t{ir_path}" for rgb_path, ir_path in chosen),
+        encoding="utf-8",
+    )
 
     model = YOLO(args.weights)
     records: list[tuple[str, np.ndarray, float]] = []
@@ -163,8 +173,7 @@ def main() -> int:
     summary_rows = []
     directions = ("IR->RGB", "RGB->IR")
     try:
-        for rgb_path in chosen:
-            ir_path = ir_dir / rgb_path.name
+        for rgb_path, ir_path in chosen:
             rgb = read_image_3ch(rgb_path)
             ir = read_image_3ch(ir_path)
             if rgb.shape[:2] != ir.shape[:2]:
