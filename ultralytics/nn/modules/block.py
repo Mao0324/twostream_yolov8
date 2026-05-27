@@ -1717,6 +1717,31 @@ class SparseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class ModalityReliabilityGate(nn.Module):
+    """Channel-wise reliability gate for RGB/IR cross-modal residuals."""
+
+    def __init__(self, c, reduction=16, gate_scale=0.5):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        self.gate_scale = gate_scale
+        self.net = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(2 * c, hidden, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, 2 * c, 1, bias=True),
+        )
+
+    def forward(self, rgb, ir):
+        # 根据 RGB/IR 的全局通道响应预测可靠性，输出分别控制 RGB 源和 IR 源的跨模态残差。
+        logits = self.net(torch.cat([rgb, ir], dim=1))
+        w_rgb, w_ir = logits.chunk(2, dim=1)
+
+        # Tanh 残差门控初始接近 1，既能抑制不可靠模态，也能小幅增强可靠模态。
+        w_rgb = 1.0 + self.gate_scale * torch.tanh(w_rgb)
+        w_ir = 1.0 + self.gate_scale * torch.tanh(w_ir)
+        return w_rgb, w_ir
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1747,6 +1772,7 @@ class ASSARIFusion(nn.Module):
         self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
         self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
         self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+        self.reliability_gate = ModalityReliabilityGate(c)
 
     def forward(self, x):
         """Fuse concatenated RGB/IR feature tensor."""
@@ -1755,8 +1781,11 @@ class ASSARIFusion(nn.Module):
             raise ValueError(f"ASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
         delta_rgb = self.xattn(rgb, ir)
         delta_ir = self.xattn(ir, rgb)
-        rgb = rgb + self.scale_rgb * delta_rgb
-        ir = ir + self.scale_ir * delta_ir
+        w_rgb, w_ir = self.reliability_gate(rgb, ir)
+
+        # delta_rgb 来源于 IR，因此使用 IR 可靠性控制注入 RGB 的强度；反向同理。
+        rgb = rgb + self.scale_rgb * w_ir * delta_rgb
+        ir = ir + self.scale_ir * w_rgb * delta_ir
         return torch.cat([rgb, ir], dim=1)
 
 
