@@ -1635,6 +1635,38 @@ class LayerNorm2d(nn.Module):
         return x * self.weight[:, None, None] + self.bias[:, None, None]
 
 
+class DynamicDepthwiseConv2d(nn.Module):
+    """Input-adaptive depth-wise convolution for Q/KV local context."""
+
+    def __init__(self, channels, kernel_size=3, num_kernels=4, reduction=4):
+        super().__init__()
+        self.channels = channels
+        self.num_kernels = num_kernels
+        padding = kernel_size // 2
+
+        # 多个静态 depth-wise 卷积分支提供不同的局部模式，门控网络负责按输入自适应组合。
+        self.branches = nn.ModuleList(
+            nn.Conv2d(channels, channels, kernel_size, padding=padding, groups=channels, bias=False)
+            for _ in range(num_kernels)
+        )
+
+        hidden = max(8, channels // reduction)
+        # 根据当前特征生成每个样本、每个通道的分支权重，实现轻量动态卷积。
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, hidden, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, channels * num_kernels, 1, bias=True),
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.shape
+        # softmax 保证同一通道上的多个卷积分支权重和为 1，避免动态融合放大特征尺度。
+        weights = self.gate(x).view(b, self.num_kernels, c, 1, 1).softmax(dim=1)
+        branch_outs = torch.stack([branch(x) for branch in self.branches], dim=1)
+        return (branch_outs * weights).sum(dim=1)
+
+
 class SparseCrossChannelAttention2d(nn.Module):
     """Sparse transposed channel attention from ref to src, both [B, C, H, W]."""
 
@@ -1656,8 +1688,8 @@ class SparseCrossChannelAttention2d(nn.Module):
         self.norm_ref = LayerNorm2d(c)
         self.q_proj = nn.Conv2d(c, hidden, 1, bias=False)
         self.kv_proj = nn.Conv2d(c, hidden, 1, bias=False)
-        self.q_dw = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
-        self.kv_dw = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
+        self.q_dw = DynamicDepthwiseConv2d(hidden)
+        self.kv_dw = DynamicDepthwiseConv2d(hidden)
         self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
         self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
 
