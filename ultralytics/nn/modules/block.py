@@ -1712,7 +1712,8 @@ class ASSARIFusion(nn.Module):
     def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
         super().__init__()
         self.c = c
-        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.xattn_rgb = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.xattn_ir = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
         self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
         self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
 
@@ -1721,8 +1722,8 @@ class ASSARIFusion(nn.Module):
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"ASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
-        delta_rgb = self.xattn(rgb, ir)
-        delta_ir = self.xattn(ir, rgb)
+        delta_rgb = self.xattn_rgb(rgb, ir)
+        delta_ir = self.xattn_ir(ir, rgb)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)
