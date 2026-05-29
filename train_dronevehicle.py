@@ -15,7 +15,6 @@ results = model.train(
     epochs=100,
     imgsz=640,
     device='2,3',
-    project='dronevehicle_runs_assafusion_c2f_fusion_conv_close_mosaic=10',
-    task='obb',
-    close_mosaic=10
+    project='dronevehicle_runs_assafusion_c2f_fusion_conv_separate-attn',
+    task='obb'
 )
