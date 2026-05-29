@@ -207,6 +207,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--channel-weights", type=Path, default=DEFAULT_CHANNEL_WEIGHTS)
     parser.add_argument("--spatial-weights", type=Path, default=DEFAULT_SPATIAL_WEIGHTS)
     parser.add_argument("--make-weights", action="store_true", help="Generate missing branch-specific transferred weights first.")
+    parser.add_argument("--force-make-weights", action="store_true", help="Regenerate branch-specific transferred weights even if files exist.")
     parser.add_argument("--work-dir", type=Path, default=ROOT / "ablation_data" / "dronevehicle_attention")
     parser.add_argument("--project", type=Path, default=ROOT / "runs_ablation" / "dronevehicle_attention")
     parser.add_argument("--train-samples", type=int, default=2000)
@@ -235,9 +236,9 @@ def main() -> int:
         return 0
 
     if args.make_weights:
-        if args.only in {"both", "channel"} and not args.channel_weights.exists():
+        if args.only in {"both", "channel"} and (args.force_make_weights or not args.channel_weights.exists()):
             make_twostream_weights(args.source_weights, args.channel_yaml, args.channel_weights)
-        if args.only in {"both", "spatial"} and not args.spatial_weights.exists():
+        if args.only in {"both", "spatial"} and (args.force_make_weights or not args.spatial_weights.exists()):
             make_twostream_weights(args.source_weights, args.spatial_yaml, args.spatial_weights)
 
     if args.only in {"both", "channel"}:
