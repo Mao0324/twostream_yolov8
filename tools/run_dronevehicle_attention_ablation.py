@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run a small DroneVehicle ablation: channel sparse attention vs spatial sparse+dense attention.
+"""Run a small DroneVehicle ablation: channel sparse attention vs channel sparse+dense attention.
 
 The script creates deterministic train/val/test file lists from data/dronevehicle.yaml, then
 prints or runs two comparable YOLO OBB experiments:
   1) ASSARIFusion: original channel sparse attention branch.
-  2) ASSADualBranchRIFusion: new spatial sparse+dense cross-modal branch.
+  2) ASSADualBranchRIFusion: new channel sparse+dense cross-modal branch.
 
 Example:
   python tools/run_dronevehicle_attention_ablation.py --run --device 0 --epochs 30 --train-samples 2000 --val-samples 500
@@ -202,7 +202,7 @@ def print_commands(data_yaml: Path, args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="DroneVehicle channel-vs-spatial attention ablation.")
+    parser = argparse.ArgumentParser(description="DroneVehicle channel sparse vs channel sparse+dense attention ablation.")
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--channel-yaml", type=Path, default=DEFAULT_CHANNEL_YAML)
     parser.add_argument("--spatial-yaml", type=Path, default=DEFAULT_SPATIAL_YAML)
@@ -247,7 +247,7 @@ def main() -> int:
     if args.only in {"both", "channel"}:
         train_and_test("channel_sparse_assarifusion", args.channel_yaml, args.channel_weights, data_yaml, args)
     if args.only in {"both", "spatial"}:
-        train_and_test("spatial_sparse_dense_dualbranch", args.spatial_yaml, args.spatial_weights, data_yaml, args)
+        train_and_test("channel_sparse_dense_dualbranch", args.spatial_yaml, args.spatial_weights, data_yaml, args)
     return 0
 
 
