@@ -1738,7 +1738,9 @@ class SparseDenseSpatialCrossAttention2d(nn.Module):
         if self.norm_attn:
             sparse_attn = sparse_attn / (sparse_attn.sum(dim=-1, keepdim=True) + 1e-6)
 
-        self.last_sparsity = (sparse_attn <= 1e-6).float().mean().detach()
+        # 训练时不统计稀疏率，避免额外构造一个与 attention 同尺寸的显存大张量。
+        if not self.training:
+            self.last_sparsity = (sparse_attn <= 1e-6).float().mean().detach()
         branch_weight = torch.softmax(self.branch_logits, dim=0)
         attn = branch_weight[0] * sparse_attn + branch_weight[1] * dense_attn
 
