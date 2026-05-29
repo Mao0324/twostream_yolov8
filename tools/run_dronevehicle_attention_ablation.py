@@ -106,6 +106,9 @@ def build_subset_yaml(args: argparse.Namespace) -> Path:
         write_list(ir_list, ir_sample)
         subset[split_name] = str(rgb_list.resolve())
         subset[f"{split_name}_ir"] = str(ir_list.resolve())
+        # 当前 fork 的 validator 使用 Path(data[split]).name + "_ir" 取红外路径。
+        # 对 txt 列表 split，额外写入这个别名，兼容 split="test" 的显式评估。
+        subset[f"{rgb_list.name}_ir"] = str(ir_list.resolve())
         print(f"[subset] {split_name}: {len(rgb_sample)} pairs")
 
     yaml_path = out_dir / "dronevehicle_ablation.yaml"
