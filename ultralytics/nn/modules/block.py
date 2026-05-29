@@ -43,6 +43,7 @@ __all__ = (
     "SparseCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
+    "ASSADualBranchRIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1685,6 +1686,66 @@ class SparseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class SparseDenseSpatialCrossAttention2d(nn.Module):
+    """共享参数的跨模态空间注意力：ReLU^2 稀疏分支 + Softmax 稠密分支。"""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, max_kv_tokens=1024):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        heads = max(1, min(int(heads), hidden))
+        while hidden % heads != 0 and heads > 1:
+            heads -= 1
+
+        self.c = c
+        self.hidden = hidden
+        self.heads = heads
+        self.dim = hidden // heads
+        self.norm_attn = norm_attn
+        self.max_kv_tokens = max(1, int(max_kv_tokens))
+        self.last_sparsity = None
+
+        self.norm_q = LayerNorm2d(c)
+        self.norm_kv = LayerNorm2d(c)
+        self.q_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.k_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.v_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+        # 两个分支的可学习权重，softmax 后分别作为 w1、w2。
+        self.branch_logits = nn.Parameter(torch.zeros(2))
+
+    def _pool_kv(self, x):
+        """P3 等高分辨率特征会先压缩 K/V，避免完整 N*N 空间注意力显存过大。"""
+        b, c, h, w = x.shape
+        if h * w <= self.max_kv_tokens:
+            return x
+        side = max(1, int(self.max_kv_tokens ** 0.5))
+        return F.adaptive_avg_pool2d(x, (side, side))
+
+    def forward(self, src, ref):
+        """src 产生 Q，ref 产生 K/V，返回 ref 对 src 的跨模态增强特征。"""
+        b, _, h, w = src.shape
+        ref_kv = self._pool_kv(ref)
+        hk, wk = ref_kv.shape[-2:]
+
+        q = self.q_proj(self.norm_q(src)).reshape(b, self.heads, self.dim, h * w).transpose(-2, -1)
+        k = self.k_proj(self.norm_kv(ref_kv)).reshape(b, self.heads, self.dim, hk * wk).transpose(-2, -1)
+        v = self.v_proj(self.norm_kv(ref_kv)).reshape(b, self.heads, self.dim, hk * wk).transpose(-2, -1)
+
+        score = torch.matmul(q, k.transpose(-2, -1)) * (self.dim ** -0.5) * self.temperature
+        dense_attn = torch.softmax(score, dim=-1)
+        sparse_attn = F.relu(score).pow(2)
+        if self.norm_attn:
+            sparse_attn = sparse_attn / (sparse_attn.sum(dim=-1, keepdim=True) + 1e-6)
+
+        self.last_sparsity = (sparse_attn <= 1e-6).float().mean().detach()
+        branch_weight = torch.softmax(self.branch_logits, dim=0)
+        attn = branch_weight[0] * sparse_attn + branch_weight[1] * dense_attn
+
+        out = torch.matmul(attn, v).transpose(-2, -1).reshape(b, self.hidden, h, w)
+        return self.out_proj(out)
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1726,6 +1787,45 @@ class ASSARIFusion(nn.Module):
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)
+
+
+class ASSADualBranchRIFusion(nn.Module):
+    """面向双流检测的 ASSA/AST 双分支跨模态融合模块，输入/输出均为 [B, 2C, H, W]。"""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3, max_kv_tokens=1024):
+        super().__init__()
+        self.c = c
+        # 第一步：模态内局部增强，1x1 对齐后接静态 3x3 深度卷积。
+        self.rgb_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
+        self.ir_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
+        # 第二步：同一个 SparseAttention 模块双向复用，实现参数共享。
+        self.xattn = SparseDenseSpatialCrossAttention2d(c, reduction, heads, norm_attn, max_kv_tokens)
+        # 第三步：通道 refinement，拼接四路特征后用门控深度卷积细化。
+        self.fuse = Conv(4 * c, 2 * c, 1)
+        self.split_proj = Conv(2 * c, 2 * c, 1)
+        self.refine_dw = nn.Sequential(
+            nn.Conv2d(c, c, 3, padding=1, groups=c, bias=False),
+            nn.BatchNorm2d(c),
+        )
+        self.out_proj = Conv(c, 2 * c, 1)
+        # 继承原分支的小尺度残差注入，便于从双流预训练权重稳定起训。
+        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse concatenated RGB/IR feature tensor with sparse+dense spatial cross attention."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSADualBranchRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        rgb_local = self.rgb_local(rgb)
+        ir_local = self.ir_local(ir)
+        attn_rgb_from_ir = self.xattn(rgb_local, ir_local)
+        attn_ir_from_rgb = self.xattn(ir_local, rgb_local)
+
+        fused = self.fuse(torch.cat([rgb_local, ir_local, attn_rgb_from_ir, attn_ir_from_rgb], dim=1))
+        f1, f2 = torch.chunk(self.split_proj(fused), chunks=2, dim=1)
+        refined = f1 * F.gelu(self.refine_dw(f2))
+        return x + self.scale * self.out_proj(refined)
 
 
 class ASSARefine(nn.Module):
