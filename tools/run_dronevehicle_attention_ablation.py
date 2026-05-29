@@ -14,16 +14,23 @@ from __future__ import annotations
 
 import argparse
 import random
+import subprocess
+import sys
 from pathlib import Path
-
-from ultralytics.utils import yaml_load, yaml_save
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ultralytics.utils import yaml_load, yaml_save
+
 DEFAULT_DATA = ROOT / "data" / "dronevehicle.yaml"
 DEFAULT_CHANNEL_YAML = ROOT / "yaml" / "yolov8_twostream_obb_assafusion_postc2f.yaml"
 DEFAULT_SPATIAL_YAML = ROOT / "yaml" / "yolov8_twostream_obb_assafusion_dualbranch_postc2f.yaml"
-DEFAULT_WEIGHTS = ROOT / "pre-trained" / "yolov8s-obb_twostream.pt"
+DEFAULT_SINGLE_WEIGHTS = ROOT / "pre-trained" / "yolov8s-obb.pt"
+DEFAULT_CHANNEL_WEIGHTS = ROOT / "pre-trained" / "yolov8s-obb_twostream.pt"
+DEFAULT_SPATIAL_WEIGHTS = ROOT / "pre-trained" / "yolov8s-obb_twostream_dualbranch.pt"
 
 
 def resolve_split_path(data: dict, key: str) -> Path:
@@ -107,16 +114,32 @@ def build_subset_yaml(args: argparse.Namespace) -> Path:
     return yaml_path
 
 
-def train_and_test(exp_name: str, model_yaml: Path, data_yaml: Path, args: argparse.Namespace) -> None:
+def make_twostream_weights(source: Path, target_yaml: Path, output: Path) -> None:
+    """Create branch-specific transferred weights with the repo's conversion script."""
+    cmd = [
+        sys.executable,
+        str(ROOT / "tools" / "make_twostream_obb_weights.py"),
+        "--source",
+        str(source),
+        "--target-yaml",
+        str(target_yaml),
+        "--output",
+        str(output),
+    ]
+    print("[make-weights] " + " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def train_and_test(exp_name: str, model_yaml: Path, weights: Path, data_yaml: Path, args: argparse.Namespace) -> None:
     """Train one branch and immediately evaluate its best checkpoint on the test split."""
     from ultralytics import YOLO
     import ultralytics.nn.tasks  # noqa: F401
 
     model = YOLO(str(model_yaml))
-    if args.weights and args.weights.exists():
-        model.load(str(args.weights))
-    elif args.weights:
-        print(f"[WARN] weights not found, training from model init: {args.weights}")
+    if weights and weights.exists():
+        model.load(str(weights))
+    elif weights:
+        print(f"[WARN] weights not found, training from model init: {weights}")
 
     project = args.project / exp_name
     model.train(
@@ -158,12 +181,21 @@ def train_and_test(exp_name: str, model_yaml: Path, data_yaml: Path, args: argpa
 def print_commands(data_yaml: Path, args: argparse.Namespace) -> None:
     """Print reproducible commands when the user wants to run manually."""
     common = (
-        f"--data {data_yaml} --weights {args.weights} --epochs {args.epochs} --imgsz {args.imgsz} "
+        f"--data {data_yaml} --epochs {args.epochs} --imgsz {args.imgsz} "
         f"--batch {args.batch} --device {args.device} --seed {args.seed}"
     )
+    print("\nGenerate branch-specific transferred weights:")
+    print(
+        f"python tools/make_twostream_obb_weights.py --source {args.source_weights} "
+        f"--target-yaml {args.channel_yaml} --output {args.channel_weights}"
+    )
+    print(
+        f"python tools/make_twostream_obb_weights.py --source {args.source_weights} "
+        f"--target-yaml {args.spatial_yaml} --output {args.spatial_weights}"
+    )
     print("\nManual equivalent:")
-    print(f"python tools/run_dronevehicle_attention_ablation.py --run --only channel {common}")
-    print(f"python tools/run_dronevehicle_attention_ablation.py --run --only spatial {common}")
+    print(f"python tools/run_dronevehicle_attention_ablation.py --run --only channel --channel-weights {args.channel_weights} {common}")
+    print(f"python tools/run_dronevehicle_attention_ablation.py --run --only spatial --spatial-weights {args.spatial_weights} {common}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -171,7 +203,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--channel-yaml", type=Path, default=DEFAULT_CHANNEL_YAML)
     parser.add_argument("--spatial-yaml", type=Path, default=DEFAULT_SPATIAL_YAML)
-    parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
+    parser.add_argument("--source-weights", type=Path, default=DEFAULT_SINGLE_WEIGHTS)
+    parser.add_argument("--channel-weights", type=Path, default=DEFAULT_CHANNEL_WEIGHTS)
+    parser.add_argument("--spatial-weights", type=Path, default=DEFAULT_SPATIAL_WEIGHTS)
+    parser.add_argument("--make-weights", action="store_true", help="Generate missing branch-specific transferred weights first.")
     parser.add_argument("--work-dir", type=Path, default=ROOT / "ablation_data" / "dronevehicle_attention")
     parser.add_argument("--project", type=Path, default=ROOT / "runs_ablation" / "dronevehicle_attention")
     parser.add_argument("--train-samples", type=int, default=2000)
@@ -199,10 +234,16 @@ def main() -> int:
         print_commands(data_yaml, args)
         return 0
 
+    if args.make_weights:
+        if args.only in {"both", "channel"} and not args.channel_weights.exists():
+            make_twostream_weights(args.source_weights, args.channel_yaml, args.channel_weights)
+        if args.only in {"both", "spatial"} and not args.spatial_weights.exists():
+            make_twostream_weights(args.source_weights, args.spatial_yaml, args.spatial_weights)
+
     if args.only in {"both", "channel"}:
-        train_and_test("channel_sparse_assarifusion", args.channel_yaml, data_yaml, args)
+        train_and_test("channel_sparse_assarifusion", args.channel_yaml, args.channel_weights, data_yaml, args)
     if args.only in {"both", "spatial"}:
-        train_and_test("spatial_sparse_dense_dualbranch", args.spatial_yaml, data_yaml, args)
+        train_and_test("spatial_sparse_dense_dualbranch", args.spatial_yaml, args.spatial_weights, data_yaml, args)
     return 0
 
 
