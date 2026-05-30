@@ -15,6 +15,6 @@ results = model.train(
     epochs=100,
     imgsz=640,
     device='2,3',
-    project='dronevehicle_runs_assafusion_c2f_fusion_conv_dual_sparse_dense_fusion',
+    project='dronevehicle_runs_assafusion_c2f_fusion_conv_dual_sparse_dense_onlyp3p4_p5assa',
     task='obb'
 )

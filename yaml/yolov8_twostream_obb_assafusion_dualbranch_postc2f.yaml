@@ -38,7 +38,7 @@ backbone:
   - [-4, 3, C2f_Faster, [1024, True]] # 19 P5/32 IR
   - [-4, 1, SPPF, [1024, 5]] # 20 P5/32 RGB
   - [-4, 1, SPPF, [1024, 5]] # 21 P5/32 IR
-  - [-3, 1, ASSADualBranchRIFusion, [1024, 8, 4, True, 0.001]] # 22 P5/32 dual sparse+dense channel fusion
+  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]] # 22 P5/32 dual sparse+dense channel fusion
 
   - [10, 1, ADD, [1]] # 23 P3 to FPN
   - [15, 1, ADD, [1]] # 24 P4 to FPN
