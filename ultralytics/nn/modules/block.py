@@ -44,6 +44,7 @@ __all__ = (
     "ASSAAdd",
     "ASSARIFusion",
     "ASSADualBranchRIFusion",
+    "ASSADenseBranchRIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1738,6 +1739,46 @@ class SparseDenseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class DenseCrossChannelAttention2d(nn.Module):
+    """共享参数的跨模态通道稠密注意力：仅保留 Softmax(QK^T / sqrt(d)) 稠密分支。"""
+
+    def __init__(self, c, reduction=8, heads=4):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        heads = max(1, min(int(heads), hidden))
+        while hidden % heads != 0 and heads > 1:
+            heads -= 1
+
+        self.c = c
+        self.hidden = hidden
+        self.heads = heads
+        self.dim = hidden // heads
+
+        self.norm_q = LayerNorm2d(c)
+        self.norm_kv = LayerNorm2d(c)
+        self.q_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.k_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.v_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+
+    def forward(self, src, ref):
+        """src 生成 Q，ref 生成 K/V，用稠密 Softmax 注意力把另一模态信息补充到当前模态。"""
+        b, _, h, w = src.shape
+        q = self.q_proj(self.norm_q(src)).reshape(b, self.heads, self.dim, h * w)
+        k = self.k_proj(self.norm_kv(ref)).reshape(b, self.heads, self.dim, h * w)
+        v = self.v_proj(self.norm_kv(ref)).reshape(b, self.heads, self.dim, h * w)
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+
+        # Dense-only 消融：去掉 ReLU^2 稀疏分支，只使用全连接 Softmax 相关性。
+        score = torch.matmul(q, k.transpose(-2, -1)) * (self.dim ** -0.5) * self.temperature
+        attn = torch.softmax(score, dim=-1)
+
+        out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
+        return self.out_proj(out)
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1808,6 +1849,45 @@ class ASSADualBranchRIFusion(nn.Module):
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"ASSADualBranchRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        rgb_local = self.rgb_local(rgb)
+        ir_local = self.ir_local(ir)
+        attn_rgb_from_ir = self.xattn(rgb_local, ir_local)
+        attn_ir_from_rgb = self.xattn(ir_local, rgb_local)
+
+        fused = self.fuse(torch.cat([rgb_local, ir_local, attn_rgb_from_ir, attn_ir_from_rgb], dim=1))
+        f1, f2 = torch.chunk(self.split_proj(fused), chunks=2, dim=1)
+        refined = f1 * F.gelu(self.refine_dw(f2))
+        return x + self.scale * self.out_proj(refined)
+
+
+class ASSADenseBranchRIFusion(nn.Module):
+    """Dense-only 双流融合模块，输入/输出均为 [B, 2C, H, W]，用于验证稠密分支对检测召回和 mAP50 的贡献。"""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        # 第一步：模态内局部增强。保持与 dual sparse+dense 模块一致，保证消融只改变注意力分支。
+        self.rgb_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
+        self.ir_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
+        # 第二步：双向跨模态通道注意力。这里仅使用 Dense branch，不混入 ReLU^2 sparse branch。
+        self.xattn = DenseCrossChannelAttention2d(c, reduction, heads)
+        # 第三步：保持原 dual 模块的 refinement 结构，便于和 Sparse+Dense 版本做公平对比。
+        self.fuse = Conv(4 * c, 2 * c, 1)
+        self.split_proj = Conv(2 * c, 2 * c, 1)
+        self.refine_dw = nn.Sequential(
+            nn.Conv2d(c, c, 3, padding=1, groups=c, bias=False),
+            nn.BatchNorm2d(c),
+        )
+        self.out_proj = Conv(c, 2 * c, 1)
+        # 小尺度残差注入，降低从 OBB 预训练权重迁移后的训练震荡。
+        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """使用 Dense-only 跨模态注意力融合拼接后的 RGB/IR 特征。"""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSADenseBranchRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
 
         rgb_local = self.rgb_local(rgb)
         ir_local = self.ir_local(ir)

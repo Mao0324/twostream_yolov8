@@ -52,6 +52,7 @@ from ultralytics.nn.modules import (
     Concat2,
     ADD,
     ASSAAdd,
+    ASSADenseBranchRIFusion,
     ASSADualBranchRIFusion,
     ASSARIFusion,
     ASSARefine,
@@ -1086,6 +1087,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = stream_rgb_ch
             args = [c2, *args[1:]]
         elif m is ASSADualBranchRIFusion:
+            c2 = stream_rgb_ch
+            args = [c2, *args[1:]]
+        elif m is ASSADenseBranchRIFusion:
             c2 = stream_rgb_ch
             args = [c2, *args[1:]]
         elif m is Silence:
