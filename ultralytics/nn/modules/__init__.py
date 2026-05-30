@@ -51,6 +51,7 @@ from .block import (
     ADD,
     ASSAAdd,
     ASSADualBranchRIFusion,
+    ASSADualBranchLiteRIFusion,
     ASSARIFusion,
     ASSARefine,
     SimAM,
@@ -171,6 +172,7 @@ __all__ = (
     "Silence",
     "ASSAAdd",
     "ASSADualBranchRIFusion",
+    "ASSADualBranchLiteRIFusion",
     "ASSARIFusion",
     "ASSARefine",
 )

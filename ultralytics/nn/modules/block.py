@@ -44,6 +44,7 @@ __all__ = (
     "ASSAAdd",
     "ASSARIFusion",
     "ASSADualBranchRIFusion",
+    "ASSADualBranchLiteRIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1818,6 +1819,35 @@ class ASSADualBranchRIFusion(nn.Module):
         f1, f2 = torch.chunk(self.split_proj(fused), chunks=2, dim=1)
         refined = f1 * F.gelu(self.refine_dw(f2))
         return x + self.scale * self.out_proj(refined)
+
+
+class ASSADualBranchLiteRIFusion(nn.Module):
+    """轻量版 Sparse+Dense 双分支通道融合：保留局部增强和注意力，去掉复杂 refinement。"""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        # 模态内局部增强仅用于生成更稳定的 Q/K/V，不再做四路拼接 refinement。
+        self.rgb_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
+        self.ir_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
+        # 共享参数的 Sparse + Dense 通道跨模态注意力。
+        self.xattn = SparseDenseCrossChannelAttention2d(c, reduction, heads, norm_attn)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse RGB/IR features without heavy channel refinement."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSADualBranchLiteRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        rgb_local = self.rgb_local(rgb)
+        ir_local = self.ir_local(ir)
+        delta_rgb = self.xattn(rgb_local, ir_local)
+        delta_ir = self.xattn(ir_local, rgb_local)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
 
 
 class ASSARefine(nn.Module):
