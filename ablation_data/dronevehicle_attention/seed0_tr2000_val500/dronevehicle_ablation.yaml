@@ -1,0 +1,17 @@
+path: ''
+names:
+  0: car
+  1: truck
+  2: bus
+  3: van
+  4: freight_car
+nc: 5
+train: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/train_rgb.txt
+train_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/train_ir.txt
+train_rgb.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/train_ir.txt
+val: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/val_rgb.txt
+val_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/val_ir.txt
+val_rgb.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/val_ir.txt
+test: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/test_rgb.txt
+test_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/test_ir.txt
+test_rgb.txt_ir: /home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/ablation_data/dronevehicle_attention/seed0_tr2000_val500/test_ir.txt

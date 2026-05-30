@@ -1,0 +1,31 @@
+(spikeyolo) biiteam@biiteam-SYS-4028GR-TR:~/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2$ python test_dronevehicle.py     --weights runs_ablation/dronevehicle_attention/channel_sparse_assarifusion/train/weights/best.pt     --data ablation_data/dronevehicle_attention/seed0_tr2000_val500/dronevehicle_ablation.yaml
+Ultralytics YOLOv8.1.47 🚀 Python-3.9.0 torch-2.0.0+cu117 CUDA:0 (NVIDIA GeForce RTX 3090, 24133MiB)
+YOLOv8_twostream_obb_assafusion_postc2f summary (fused): 293 layers, 14854804 parameters, 0 gradients, 37.2 GFLOPs
+val: Scanning /home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/labels/test... 500 images, 1 backgrounds, 0 corrupt: 100%|██████████| 500/500 [00:11<00:00, 43.22it/s]
+val: New cache created: /home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/labels/test.cache
+                 Class     Images  Instances      Box(P          R      mAP50  mAP50-95): 100%|██████████| 32/32 [00:30<00:00,  1.04it/s]
+                   all        500       8245      0.681      0.674      0.694      0.553
+                   car        500       7111      0.928      0.953      0.977      0.807
+                 truck        500        429      0.618       0.62      0.632      0.484
+                   bus        500        266      0.932       0.88      0.954      0.746
+                   van        500        245      0.518      0.355      0.416      0.336
+           freight_car        500        194      0.411      0.562      0.491      0.394
+Speed: 1.5ms preprocess, 9.8ms inference, 0.0ms loss, 10.7ms postprocess per image
+前向传播 FPS:102.20
+Results saved to /home/biiteam/Storage-3.5T/WBY/v1_basespike_rgbir/runs_flir/obb/test_dronevehicle43
+ultralytics.utils.metrics.OBBMetrics object with attributes:
+
+ap_class_index: array([0, 1, 2, 3, 4])
+box: ultralytics.utils.metrics.Metric object
+confusion_matrix: <ultralytics.utils.metrics.ConfusionMatrix object at 0x7f1613df47f0>
+curves: []
+curves_results: []
+fitness: 0.5675434053492858
+keys: ['metrics/precision(B)', 'metrics/recall(B)', 'metrics/mAP50(B)', 'metrics/mAP50-95(B)']
+maps: array([    0.80732,     0.48402,     0.74612,     0.33608,     0.39394])
+names: {0: 'car', 1: 'truck', 2: 'bus', 3: 'van', 4: 'freight_car'}
+plot: True
+results_dict: {'metrics/precision(B)': 0.6813834624935741, 'metrics/recall(B)': 0.6738824919563532, 'metrics/mAP50(B)': 0.6939727237164617, 'metrics/mAP50-95(B)': 0.5534957033084885, 'fitness': 0.5675434053492858}
+save_dir: PosixPath('/home/biiteam/Storage-3.5T/WBY/v1_basespike_rgbir/runs_flir/obb/test_dronevehicle43')
+speed: {'preprocess': 1.4848737716674805, 'inference': 9.785096168518066, 'loss': 0.0010790824890136719, 'postprocess': 10.746726989746094}
+
