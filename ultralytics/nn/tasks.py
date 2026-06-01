@@ -53,6 +53,8 @@ from ultralytics.nn.modules import (
     ADD,
     ASSAAdd,
     ASSADenseResidualRIFusion,
+    GADenseResidualRIFusion,
+    GAASSARIFusion,
     ASSADualBranchRIFusion,
     ASSADualBranchLiteRIFusion,
     ASSAForegroundDenseRIFusion,
@@ -1095,7 +1097,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is ASSADualBranchLiteRIFusion:
             c2 = stream_rgb_ch
             args = [c2, *args[1:]]
-        elif m in {ASSADenseResidualRIFusion, ASSAForegroundDenseRIFusion, ASSASparseDenseResidualRIFusion}:
+        elif m in {
+            ASSADenseResidualRIFusion,
+            GADenseResidualRIFusion,
+            GAASSARIFusion,
+            ASSAForegroundDenseRIFusion,
+            ASSASparseDenseResidualRIFusion,
+        }:
             c2 = stream_rgb_ch
             args = [c2, *args[1:]]
         elif m is Silence:

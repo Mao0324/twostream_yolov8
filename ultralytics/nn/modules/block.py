@@ -46,6 +46,8 @@ __all__ = (
     "ASSADualBranchRIFusion",
     "ASSADualBranchLiteRIFusion",
     "ASSADenseResidualRIFusion",
+    "GADenseResidualRIFusion",
+    "GAASSARIFusion",
     "ASSAForegroundDenseRIFusion",
     "ASSASparseDenseResidualRIFusion",
     "ASSARefine",
@@ -1891,6 +1893,97 @@ class ASSADualBranchLiteRIFusion(nn.Module):
         return torch.cat([rgb, ir], dim=1)
 
 
+class GeometryAwareARLocalAdapter(nn.Module):
+    """Shared geometry-aware rectangular local adapter for RGB/IR features."""
+
+    def __init__(
+        self,
+        c,
+        kernels=((3, 3), (3, 5), (5, 3), (3, 7), (7, 3)),
+        ctx_ratio=8,
+        use_affine=True,
+        shared_geometry=True,
+        init_scale=1e-3,
+    ):
+        super().__init__()
+        hidden = max(8, c // ctx_ratio)
+        self.c = c
+        self.kernels = tuple(tuple(k) for k in kernels)
+        self.use_affine = use_affine
+        self.shared_geometry = shared_geometry
+        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+
+        self.ctx = nn.Sequential(
+            nn.Conv2d(3 * c, hidden, 1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(inplace=True),
+        )
+        self.gate = nn.Conv2d(hidden, len(self.kernels), 1, bias=True)
+        self.affine = nn.Conv2d(hidden, 2 * c, 1, bias=True) if use_affine else None
+        self.dw = nn.ModuleList(
+            nn.Sequential(
+                nn.Conv2d(c, c, k, padding=(k[0] // 2, k[1] // 2), groups=c, bias=False),
+                nn.BatchNorm2d(c),
+            )
+            for k in self.kernels
+        )
+        if not shared_geometry:
+            self.ctx_rgb = nn.Sequential(
+                nn.Conv2d(3 * c, hidden, 1, bias=False),
+                nn.BatchNorm2d(hidden),
+                nn.SiLU(inplace=True),
+            )
+            self.ctx_ir = nn.Sequential(
+                nn.Conv2d(3 * c, hidden, 1, bias=False),
+                nn.BatchNorm2d(hidden),
+                nn.SiLU(inplace=True),
+            )
+            self.gate_rgb = nn.Conv2d(hidden, len(self.kernels), 1, bias=True)
+            self.gate_ir = nn.Conv2d(hidden, len(self.kernels), 1, bias=True)
+            self.affine_rgb = nn.Conv2d(hidden, 2 * c, 1, bias=True) if use_affine else None
+            self.affine_ir = nn.Conv2d(hidden, 2 * c, 1, bias=True) if use_affine else None
+        self._init_affine()
+
+    def _init_affine(self):
+        affine_layers = [self.affine]
+        if not self.shared_geometry:
+            affine_layers += [self.affine_rgb, self.affine_ir]
+        for layer in affine_layers:
+            if layer is not None:
+                nn.init.zeros_(layer.weight)
+                nn.init.zeros_(layer.bias)
+
+    def _ctx(self, rgb, ir):
+        return torch.cat([rgb, ir, (rgb - ir).abs()], dim=1)
+
+    def _apply_bank(self, x, gate, affine=None):
+        gate = torch.softmax(gate, dim=1)
+        y = torch.stack([op(x) for op in self.dw], dim=1)
+        y = (y * gate.unsqueeze(2)).sum(dim=1)
+        if affine is not None:
+            gamma, beta = affine.chunk(2, dim=1)
+            y = y * (1.0 + gamma) + beta
+        return x + self.scale * y
+
+    def forward(self, rgb, ir):
+        """Enhance both streams using shared or independent rectangular geometry cues."""
+        ctx_in = self._ctx(rgb, ir)
+        if self.shared_geometry:
+            ctx = self.ctx(ctx_in)
+            affine = self.affine(ctx) if self.affine is not None else None
+            gate = self.gate(ctx)
+            return self._apply_bank(rgb, gate, affine), self._apply_bank(ir, gate, affine)
+
+        ctx_rgb = self.ctx_rgb(ctx_in)
+        ctx_ir = self.ctx_ir(ctx_in)
+        affine_rgb = self.affine_rgb(ctx_rgb) if self.affine_rgb is not None else None
+        affine_ir = self.affine_ir(ctx_ir) if self.affine_ir is not None else None
+        return (
+            self._apply_bank(rgb, self.gate_rgb(ctx_rgb), affine_rgb),
+            self._apply_bank(ir, self.gate_ir(ctx_ir), affine_ir),
+        )
+
+
 class ASSADenseResidualRIFusion(nn.Module):
     """Dense-only 残差跨模态融合：不重构特征，只把另一模态的稠密注意力增量加回原分支。"""
 
@@ -1909,6 +2002,76 @@ class ASSADenseResidualRIFusion(nn.Module):
             raise ValueError(f"ASSADenseResidualRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
         delta_rgb = self.xattn(rgb, ir)
         delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class GADenseResidualRIFusion(nn.Module):
+    """Geometry-Aware Dense Residual RGB-IR Fusion (GADRF)."""
+
+    def __init__(
+        self,
+        c,
+        reduction=8,
+        heads=4,
+        norm_attn=True,
+        init_scale=1e-3,
+        use_affine=True,
+        shared_geometry=True,
+    ):
+        super().__init__()
+        self.c = c
+        self.ar_local = GeometryAwareARLocalAdapter(
+            c, use_affine=use_affine, shared_geometry=shared_geometry, init_scale=init_scale
+        )
+        self.xattn = DenseCrossChannelAttention2d(c, reduction, heads)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Apply shared rectangular local enhancement before dense cross-modal residual attention."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"GADenseResidualRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        rgb_ar, ir_ar = self.ar_local(rgb, ir)
+        delta_rgb = self.xattn(rgb_ar, ir_ar)
+        delta_ir = self.xattn(ir_ar, rgb_ar)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class GAASSARIFusion(nn.Module):
+    """Geometry-aware AR local adapter followed by sparse ASSA RGB/IR fusion."""
+
+    def __init__(
+        self,
+        c,
+        reduction=8,
+        heads=4,
+        norm_attn=True,
+        init_scale=1e-3,
+        use_affine=True,
+        shared_geometry=True,
+    ):
+        super().__init__()
+        self.c = c
+        self.ar_local = GeometryAwareARLocalAdapter(
+            c, use_affine=use_affine, shared_geometry=shared_geometry, init_scale=init_scale
+        )
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Use shared rectangular geometry cues before the original sparse ASSA residual update."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"GAASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        rgb_ar, ir_ar = self.ar_local(rgb, ir)
+        delta_rgb = self.xattn(rgb_ar, ir_ar)
+        delta_ir = self.xattn(ir_ar, rgb_ar)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)
