@@ -1,5 +1,13 @@
 # Ultralytics YOLO, AGPL-3.0 license
-# Affine ablation: same as GADRF P3/P4, but ARLocal affine modulation is disabled.
+# Ablation 4: affine ablation for P3/P4 AR.
+# Architecture:
+#   P3: GADenseResidualRIFusion with ARLocal affine disabled.
+#   P4: GAASSARIFusion with ARLocal affine disabled.
+#   P5: ASSARIFusion, unchanged sparse high-level fusion.
+# Purpose:
+#   Test whether gamma/beta affine modulation after the rectangular DWConv bank is useful.
+# Key flags:
+#   use_affine=False, shared_geometry=True.
 
 nc: 5
 scales:
@@ -20,19 +28,19 @@ backbone:
   - [-1, 1, Conv, [256, 3, 2]]
   - [-4, 6, C2f, [256, True]]
   - [-4, 6, C2f_Faster, [256, True]]
-  - [-3, 1, GADenseResidualRIFusion, [256, 8, 4, True, 0.001, False, True]] # P3 GADRF no affine
+  - [-3, 1, GADenseResidualRIFusion, [256, 8, 4, True, 0.001, False, True]] # P3 GADRF, no affine, shared geometry
   - [-4, 1, Conv, [512, 3, 2]]
   - [-4, 1, Conv, [512, 3, 2]]
   - [-4, 6, C2f, [512, True]]
   - [-4, 6, C2f_Faster, [512, True]]
-  - [-3, 1, GAASSARIFusion, [512, 8, 4, True, 0.001, False, True]] # P4 ARLocal + ASSA no affine
+  - [-3, 1, GAASSARIFusion, [512, 8, 4, True, 0.001, False, True]] # P4 ARLocal + ASSA, no affine, shared geometry
   - [-4, 1, Conv, [1024, 3, 2]]
   - [-4, 1, Conv, [1024, 3, 2]]
   - [-4, 3, C2f, [1024, True]]
   - [-4, 3, C2f_Faster, [1024, True]]
   - [-4, 1, SPPF, [1024, 5]]
   - [-4, 1, SPPF, [1024, 5]]
-  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]]
+  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]] # P5 sparse ASSA
   - [10, 1, ADD, [1]]
   - [15, 1, ADD, [1]]
   - [22, 1, ADD, [1]]

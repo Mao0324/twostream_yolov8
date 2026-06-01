@@ -1,6 +1,12 @@
 # Ultralytics YOLO, AGPL-3.0 license
-# GADRF P3: P3 uses geometry-aware AR local + dense residual RGB-IR fusion.
-# P4/P5 keep sparse ASSARIFusion to avoid high-level semantic over-fusion.
+# Ablation 2: P3 AR-Dense, P4/P5 sparse ASSA.
+# Architecture:
+#   P3: GADenseResidualRIFusion = shared RGB-IR geometry ctx f([RGB, IR, |RGB-IR|])
+#       -> rectangular DWConv bank dynamic gate -> affine modulation -> DenseResidual cross-modal attention.
+#   P4: ASSARIFusion, original sparse cross-channel RGB-IR attention.
+#   P5: ASSARIFusion, original sparse cross-channel RGB-IR attention.
+# Key flags in GADenseResidualRIFusion args:
+#   [c, reduction, heads, norm_attn, init_scale, use_affine=True, shared_geometry=True]
 
 nc: 5
 scales:

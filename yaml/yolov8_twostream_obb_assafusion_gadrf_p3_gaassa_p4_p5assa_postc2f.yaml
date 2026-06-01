@@ -1,6 +1,13 @@
 # Ultralytics YOLO, AGPL-3.0 license
-# GADRF P3/P4: P3 uses AR-DenseResidualRIFusion, P4 uses ARLocal + ASSARIFusion.
-# P5 keeps sparse ASSARIFusion.
+# Ablation 3: P3/P4 AR, P5 sparse ASSA.
+# Architecture:
+#   P3: GADenseResidualRIFusion = ARLocal + DenseResidual cross-modal attention.
+#   P4: GAASSARIFusion = ARLocal + original sparse ASSARIFusion.
+#   P5: ASSARIFusion, unchanged sparse high-level fusion.
+# ARLocal is lightweight and detection-friendly:
+#   shared ctx = f([RGB, IR, |RGB-IR|]), rectangular DWConv bank gates, affine modulation.
+# Key flags in GADenseResidualRIFusion/GAASSARIFusion args:
+#   [c, reduction, heads, norm_attn, init_scale, use_affine=True, shared_geometry=True]
 
 nc: 5
 scales:
