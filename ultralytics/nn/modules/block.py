@@ -45,6 +45,9 @@ __all__ = (
     "ASSARIFusion",
     "ASSADualBranchRIFusion",
     "ASSADualBranchLiteRIFusion",
+    "ASSADenseResidualRIFusion",
+    "ASSAForegroundDenseRIFusion",
+    "ASSASparseDenseResidualRIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1739,6 +1742,44 @@ class SparseDenseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class DenseCrossChannelAttention2d(nn.Module):
+    """跨模态通道稠密注意力：只保留 Softmax(QK^T / sqrt(d)) 分支，用于 mAP50 召回导向消融。"""
+
+    def __init__(self, c, reduction=8, heads=4):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        heads = max(1, min(int(heads), hidden))
+        while hidden % heads != 0 and heads > 1:
+            heads -= 1
+
+        self.c = c
+        self.hidden = hidden
+        self.heads = heads
+        self.dim = hidden // heads
+
+        self.norm_q = LayerNorm2d(c)
+        self.norm_kv = LayerNorm2d(c)
+        self.q_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.k_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.v_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+
+    def forward(self, src, ref):
+        """src 生成 Q，ref 生成 K/V，用稠密跨模态相关性把另一模态信息补充给当前模态。"""
+        b, _, h, w = src.shape
+        q = self.q_proj(self.norm_q(src)).reshape(b, self.heads, self.dim, h * w)
+        k = self.k_proj(self.norm_kv(ref)).reshape(b, self.heads, self.dim, h * w)
+        v = self.v_proj(self.norm_kv(ref)).reshape(b, self.heads, self.dim, h * w)
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+
+        score = torch.matmul(q, k.transpose(-2, -1)) * (self.dim ** -0.5) * self.temperature
+        attn = torch.softmax(score, dim=-1)
+        out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
+        return self.out_proj(out)
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1845,6 +1886,79 @@ class ASSADualBranchLiteRIFusion(nn.Module):
         ir_local = self.ir_local(ir)
         delta_rgb = self.xattn(rgb_local, ir_local)
         delta_ir = self.xattn(ir_local, rgb_local)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class ASSADenseResidualRIFusion(nn.Module):
+    """Dense-only 残差跨模态融合：不重构特征，只把另一模态的稠密注意力增量加回原分支。"""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        # norm_attn 保留在参数表里，便于 YAML 与其它 ASSA 模块写法一致。
+        self.xattn = DenseCrossChannelAttention2d(c, reduction, heads)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """输出 concat(rgb + delta_rgb, ir + delta_ir)，避免复杂 refinement 干扰检测置信度排序。"""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSADenseResidualRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class ASSAForegroundDenseRIFusion(nn.Module):
+    """前景门控 Dense 残差融合：用空间门控 G 强化疑似目标区域的跨模态补充，偏向提升召回。"""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.xattn = DenseCrossChannelAttention2d(c, reduction, heads)
+        # G = sigmoid(Conv3x3([F_rgb, F_ir]))，生成 C 通道空间门控，控制跨模态增量注入位置。
+        self.gate = nn.Sequential(
+            nn.Conv2d(2 * c, c, 3, padding=1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """用前景门控后的 Dense 跨模态残差增强 RGB/IR，保留原主干特征作为检测基础。"""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSAForegroundDenseRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        gate = self.gate(torch.cat([rgb, ir], dim=1))
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_rgb * gate * delta_rgb
+        ir = ir + self.scale_ir * gate * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class ASSASparseDenseResidualRIFusion(nn.Module):
+    """Sparse+Dense 残差融合：保留双分支注意力，但去掉局部增强和重 refinement，仅做小尺度残差注入。"""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.xattn = SparseDenseCrossChannelAttention2d(c, reduction, heads, norm_attn)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """输出 concat(rgb + delta_rgb, ir + delta_ir)，用于分类/检测友好的轻量跨模态增强。"""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSASparseDenseResidualRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)
