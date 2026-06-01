@@ -194,7 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--close-mosaic", type=int, default=10)
+    parser.add_argument("--close-mosaic", type=int, default=0)
     parser.add_argument("--conf", type=float, default=0.001)
     parser.add_argument("--iou", type=float, default=0.7)
     parser.add_argument("--force-make-weights", action="store_true")
