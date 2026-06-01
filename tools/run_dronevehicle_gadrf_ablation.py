@@ -186,7 +186,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--val-batch", type=int, default=16)
-    parser.add_argument("--device", type=str, default="0")
+    parser.add_argument("--device", type=str, default="3")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--close-mosaic", type=int, default=0)
