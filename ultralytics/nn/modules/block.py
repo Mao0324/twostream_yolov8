@@ -42,6 +42,7 @@ __all__ = (
     "LayerNorm2d",
     "SparseCrossChannelAttention2d",
     "ARDepthwiseConv",
+    "CrossGuidedARDepthwiseConv",
     "ARSparseCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
@@ -1738,6 +1739,45 @@ class ARDepthwiseConv(nn.Module):
         return self.scale * y
 
 
+class CrossGuidedARDepthwiseConv(nn.Module):
+    """Cross-guided ARConv-style depthwise local enhancement.
+
+    The main feature is convolved by one shared 5x5 depthwise kernel, while the
+    active 3x3/3x5/5x3/5x5 rectangle is selected from the paired modality guide.
+    This keeps the AR branch feature-level and explicitly cross-modal:
+    ARConv(rgb, guide=ir), ARConv(ir, guide=rgb).
+    """
+
+    def __init__(self, c, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.weight = nn.Parameter(torch.empty(c, 1, 5, 5))
+        self.selector = nn.Conv2d(3 * c, 4, 1, bias=True)
+        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+        self.register_buffer("rect_masks", ARDepthwiseConv._build_rect_masks(), persistent=False)
+        nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="linear")
+        nn.init.zeros_(self.selector.weight)
+        nn.init.zeros_(self.selector.bias)
+
+    def forward(self, x, guide):
+        """Return a cross-guided local residual with shape [B, C, H, W]."""
+        if x.shape != guide.shape:
+            raise ValueError(f"CrossGuidedARDepthwiseConv expects matching shapes, got {x.shape} and {guide.shape}.")
+        b, c, h, w = x.shape
+        if c != self.c:
+            raise ValueError(f"CrossGuidedARDepthwiseConv expected {self.c} channels, got {c}.")
+
+        ctx = torch.cat([x, guide, (x - guide).abs()], dim=1)
+        logits = self.selector(F.adaptive_avg_pool2d(ctx, 1)).flatten(1)
+        rect_weight = torch.softmax(logits, dim=1).view(b, 4, 1, 1, 1, 1)
+        mask = (rect_weight * self.rect_masks.view(1, 4, 1, 1, 5, 5)).sum(dim=1)
+
+        weight = (self.weight.unsqueeze(0) * mask).reshape(b * c, 1, 5, 5)
+        y = F.conv2d(x.reshape(1, b * c, h, w), weight, padding=2, groups=b * c)
+        y = y.reshape(b, c, h, w)
+        return self.scale * y
+
+
 class ARSparseCrossChannelAttention2d(nn.Module):
     """ASSA sparse cross-channel attention with ARConv-style Q/KV local enhancement."""
 
@@ -1834,22 +1874,26 @@ class ASSARIFusion(nn.Module):
 
 
 class ARASSARIFusion(nn.Module):
-    """ASSA fusion with ARConv-style adaptive rectangular Q/KV local modeling."""
+    """Cross-guided AR local enhancement followed by original sparse ASSA fusion."""
 
     def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
         super().__init__()
         self.c = c
-        self.xattn = ARSparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.rgb_ar = CrossGuidedARDepthwiseConv(c, init_scale)
+        self.ir_ar = CrossGuidedARDepthwiseConv(c, init_scale)
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
         self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
         self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
 
     def forward(self, x):
-        """Fuse RGB/IR features with AR-enhanced sparse cross-channel attention."""
+        """Fuse RGB/IR features after cross-guided feature-level AR enhancement."""
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"ARASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
-        delta_rgb = self.xattn(rgb, ir)
-        delta_ir = self.xattn(ir, rgb)
+        rgb_ar = rgb + self.rgb_ar(rgb, ir)
+        ir_ar = ir + self.ir_ar(ir, rgb)
+        delta_rgb = self.xattn(rgb_ar, ir_ar)
+        delta_ir = self.xattn(ir_ar, rgb_ar)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)

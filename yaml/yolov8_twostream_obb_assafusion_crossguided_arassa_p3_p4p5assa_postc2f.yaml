@@ -1,7 +1,7 @@
 # Ultralytics YOLO, AGPL-3.0 license
-# YOLOv8 two-stream OBB with ARASSARIFusion at P3 and original ASSARIFusion at P4/P5.
-# ARASSA replaces fixed 3x3 Q/KV local depthwise modeling with ARConv-style adaptive
-# rectangular depthwise sampling over 3x3, 3x5, 5x3 and 5x5 ranges.
+# YOLOv8 two-stream OBB with cross-guided ARASSARIFusion at P3 and original ASSARIFusion at P4/P5.
+# ARASSA first enhances RGB by ARConv(rgb, guide=ir) and IR by ARConv(ir, guide=rgb),
+# then applies the original sparse ASSA cross-modal channel attention.
 
 nc: 5
 scales:
@@ -25,7 +25,7 @@ backbone:
 
   - [-4, 6, C2f, [256, True]] # 8 P3/8 RGB
   - [-4, 6, C2f_Faster, [256, True]] # 9 P3/8 IR
-  - [-3, 1, ARASSARIFusion, [256, 8, 4, True, 0.001]] # 10 P3 ARASSA fusion
+  - [-3, 1, ARASSARIFusion, [256, 8, 4, True, 0.001]] # 10 P3 cross-guided ARASSA fusion
   - [-4, 1, Conv, [512, 3, 2]] # 11-P4/16 RGB
   - [-4, 1, Conv, [512, 3, 2]] # 12-P4/16 IR
 
