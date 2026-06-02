@@ -50,6 +50,7 @@ from .block import (
     S2Attention,
     ADD,
     ASSAAdd,
+    ARASSARIFusion,
     ASSARIFusion,
     ASSARefine,
     SimAM,
@@ -169,6 +170,7 @@ __all__ = (
     "CBLinear",
     "Silence",
     "ASSAAdd",
+    "ARASSARIFusion",
     "ASSARIFusion",
     "ASSARefine",
 )

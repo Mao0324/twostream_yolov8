@@ -41,8 +41,11 @@ __all__ = (
     "ADD",
     "LayerNorm2d",
     "SparseCrossChannelAttention2d",
+    "ARDepthwiseConv",
+    "ARSparseCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
+    "ARASSARIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1685,6 +1688,108 @@ class SparseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class ARDepthwiseConv(nn.Module):
+    """ARConv-style adaptive rectangular depthwise convolution.
+
+    This is a detection-friendly ARConv adaptation for Q/KV local enhancement:
+    no epoch argument, no dropout, depthwise aggregation, and only 3x3/3x5/5x3/5x5
+    rectangular sampling ranges. A single 5x5 depthwise kernel is shared by all
+    choices and masked dynamically, avoiding unused candidate-conv branches in DDP.
+    """
+
+    def __init__(self, c, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.weight = nn.Parameter(torch.empty(c, 1, 5, 5))
+        self.selector = nn.Conv2d(c, 4, 1, bias=True)
+        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+        self.register_buffer("rect_masks", self._build_rect_masks(), persistent=False)
+        nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="linear")
+        nn.init.zeros_(self.selector.weight)
+        nn.init.zeros_(self.selector.bias)
+
+    @staticmethod
+    def _build_rect_masks():
+        """Build center-aligned masks for 3x3, 3x5, 5x3 and 5x5 rectangles."""
+        masks = []
+        for kh, kw in ((3, 3), (3, 5), (5, 3), (5, 5)):
+            mask = torch.zeros(1, 1, 5, 5)
+            hs = (5 - kh) // 2
+            ws = (5 - kw) // 2
+            mask[:, :, hs : hs + kh, ws : ws + kw] = 1.0
+            masks.append(mask)
+        return torch.cat(masks, dim=0)
+
+    def forward(self, x):
+        """Return a small ARConv local residual with shape [B, C, H, W]."""
+        b, c, h, w = x.shape
+        if c != self.c:
+            raise ValueError(f"ARDepthwiseConv expected {self.c} channels, got {c}.")
+
+        # Predict one adaptive rectangle distribution per sample from global Q/KV context.
+        logits = self.selector(F.adaptive_avg_pool2d(x, 1)).flatten(1)
+        rect_weight = torch.softmax(logits, dim=1).view(b, 4, 1, 1, 1, 1)
+        mask = (rect_weight * self.rect_masks.view(1, 4, 1, 1, 5, 5)).sum(dim=1)
+
+        # Use a single shared 5x5 depthwise kernel, dynamically masked per sample.
+        weight = (self.weight.unsqueeze(0) * mask).reshape(b * c, 1, 5, 5)
+        y = F.conv2d(x.reshape(1, b * c, h, w), weight, padding=2, groups=b * c)
+        y = y.reshape(b, c, h, w)
+        return self.scale * y
+
+
+class ARSparseCrossChannelAttention2d(nn.Module):
+    """ASSA sparse cross-channel attention with ARConv-style Q/KV local enhancement."""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        heads = max(1, min(int(heads), hidden))
+        while hidden % heads != 0 and heads > 1:
+            heads -= 1
+
+        self.c = c
+        self.hidden = hidden
+        self.heads = heads
+        self.dim = hidden // heads
+        self.norm_attn = norm_attn
+        self.last_sparsity = None
+
+        self.norm_src = LayerNorm2d(c)
+        self.norm_ref = LayerNorm2d(c)
+        self.q_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.kv_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.q_ar = ARDepthwiseConv(hidden, init_scale)
+        self.kv_ar = ARDepthwiseConv(hidden, init_scale)
+        self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+
+    def forward(self, src, ref):
+        """Return cross-modal sparse attention delta with AR-enhanced Q and K/V."""
+        b, _, h, w = src.shape
+        q = self.q_proj(self.norm_src(src))
+        # Q_rgb / Q_ir uses independent ARConv predicted from its own Q tensor.
+        q = q + self.q_ar(q)
+        kv = self.kv_proj(self.norm_ref(ref))
+        # KV_ir / KV_rgb uses independent ARConv predicted from its own KV tensor.
+        kv = kv + self.kv_ar(kv)
+
+        q = q.reshape(b, self.heads, self.dim, h * w)
+        k = kv.reshape(b, self.heads, self.dim, h * w)
+        v = k
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
+        attn = F.relu(attn)
+        if self.norm_attn:
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+        self.last_sparsity = (attn <= 1e-6).float().mean().detach()
+
+        out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
+        return self.out_proj(out)
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1721,6 +1826,28 @@ class ASSARIFusion(nn.Module):
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"ASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class ARASSARIFusion(nn.Module):
+    """ASSA fusion with ARConv-style adaptive rectangular Q/KV local modeling."""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.xattn = ARSparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse RGB/IR features with AR-enhanced sparse cross-channel attention."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ARASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
         delta_rgb = self.xattn(rgb, ir)
         delta_ir = self.xattn(ir, rgb)
         rgb = rgb + self.scale_rgb * delta_rgb
