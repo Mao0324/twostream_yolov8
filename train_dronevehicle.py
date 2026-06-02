@@ -3,7 +3,7 @@ from ultralytics import YOLO
 import ultralytics.nn.tasks  # noqa: F401
 
 # 1) 模型结构
-model = YOLO('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion_dualbranch_lite_postc2f.yaml')
+model = YOLO('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion_gadrf_p3_gaassa_p4_p5assa_independent_postc2f.yaml')
 
 # 2) 预训练权重（如不存在可注释掉）
 model.load('/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt')
@@ -15,6 +15,6 @@ results = model.train(
     epochs=100,
     imgsz=640,
     device='2,3',
-    project='dronevehicle_runs_assafusion_c2f_fusion_conv_dual_sparse_dense_no_refine',
+    project='dronevehicle_runs_assafusion_c2f_fusion_conv_gadrf_p3_gaassa_p4_p5assa',
     task='obb'
 )
