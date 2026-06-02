@@ -1913,13 +1913,14 @@ class GeometryAwareARLocalAdapter(nn.Module):
         self.shared_geometry = shared_geometry
         self.scale = nn.Parameter(torch.ones(1) * init_scale)
 
-        self.ctx = nn.Sequential(
-            nn.Conv2d(3 * c, hidden, 1, bias=False),
-            nn.BatchNorm2d(hidden),
-            nn.SiLU(inplace=True),
-        )
-        self.gate = nn.Conv2d(hidden, len(self.kernels), 1, bias=True)
-        self.affine = nn.Conv2d(hidden, 2 * c, 1, bias=True) if use_affine else None
+        if shared_geometry:
+            self.ctx = nn.Sequential(
+                nn.Conv2d(3 * c, hidden, 1, bias=False),
+                nn.BatchNorm2d(hidden),
+                nn.SiLU(inplace=True),
+            )
+            self.gate = nn.Conv2d(hidden, len(self.kernels), 1, bias=True)
+            self.affine = nn.Conv2d(hidden, 2 * c, 1, bias=True) if use_affine else None
         self.dw = nn.ModuleList(
             nn.Sequential(
                 nn.Conv2d(c, c, k, padding=(k[0] // 2, k[1] // 2), groups=c, bias=False),
@@ -1945,7 +1946,7 @@ class GeometryAwareARLocalAdapter(nn.Module):
         self._init_affine()
 
     def _init_affine(self):
-        affine_layers = [self.affine]
+        affine_layers = [self.affine] if self.shared_geometry else []
         if not self.shared_geometry:
             affine_layers += [self.affine_rgb, self.affine_ir]
         for layer in affine_layers:
