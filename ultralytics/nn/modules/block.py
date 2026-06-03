@@ -44,9 +44,11 @@ __all__ = (
     "ARDepthwiseConv",
     "CrossGuidedARDepthwiseConv",
     "ARSparseCrossChannelAttention2d",
+    "CrossGuidedARSparseCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
     "ARASSARIFusion",
+    "CGARASSARIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1830,6 +1832,56 @@ class ARSparseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class CrossGuidedARSparseCrossChannelAttention2d(nn.Module):
+    """Sparse cross-channel attention with cross-guided AR enhancement inside Q/KV."""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        heads = max(1, min(int(heads), hidden))
+        while hidden % heads != 0 and heads > 1:
+            heads -= 1
+
+        self.c = c
+        self.hidden = hidden
+        self.heads = heads
+        self.dim = hidden // heads
+        self.norm_attn = norm_attn
+        self.last_sparsity = None
+
+        self.norm_src = LayerNorm2d(c)
+        self.norm_ref = LayerNorm2d(c)
+        self.q_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.kv_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.q_ar = CrossGuidedARDepthwiseConv(hidden, init_scale)
+        self.kv_ar = CrossGuidedARDepthwiseConv(hidden, init_scale)
+        self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+
+    def forward(self, src, ref):
+        """Return attention delta with shape [B, C, H, W]."""
+        b, _, h, w = src.shape
+        q_base = self.q_proj(self.norm_src(src))
+        kv_base = self.kv_proj(self.norm_ref(ref))
+        q = q_base + self.q_ar(q_base, kv_base)
+        kv = kv_base + self.kv_ar(kv_base, q_base)
+
+        q = q.reshape(b, self.heads, self.dim, h * w)
+        k = kv.reshape(b, self.heads, self.dim, h * w)
+        v = k
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
+        attn = F.relu(attn)
+        if self.norm_attn:
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+        self.last_sparsity = (attn <= 1e-6).float().mean().detach()
+
+        out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
+        return self.out_proj(out)
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1894,6 +1946,28 @@ class ARASSARIFusion(nn.Module):
         ir_ar = ir + self.ir_ar(ir, rgb)
         delta_rgb = self.xattn(rgb_ar, ir_ar)
         delta_ir = self.xattn(ir_ar, rgb_ar)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class CGARASSARIFusion(nn.Module):
+    """ASSA fusion using cross-guided AR inside sparse attention Q/KV."""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.xattn = CrossGuidedARSparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse RGB/IR features without pre-enhancing the main feature tensors."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"CGARASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)

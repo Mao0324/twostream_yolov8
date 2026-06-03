@@ -53,6 +53,7 @@ from ultralytics.nn.modules import (
     ADD,
     ASSAAdd,
     ARASSARIFusion,
+    CGARASSARIFusion,
     ASSARIFusion,
     ASSARefine,
     ShuffleAttention,
@@ -1086,6 +1087,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = stream_rgb_ch
             args = [c2, *args[1:]]
         elif m is ARASSARIFusion:
+            c2 = stream_rgb_ch
+            args = [c2, *args[1:]]
+        elif m is CGARASSARIFusion:
             c2 = stream_rgb_ch
             args = [c2, *args[1:]]
         elif m is Silence:
