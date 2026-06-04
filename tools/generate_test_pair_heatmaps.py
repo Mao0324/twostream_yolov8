@@ -194,7 +194,7 @@ def normalize_cam(cam: np.ndarray) -> np.ndarray:
     return cam
 
 
-def show_cam_on_image(image_float_rgb: np.ndarray, grayscale_cam: np.ndarray) -> np.ndarray:
+def show_cam_on_image(image_float_rgb: np.ndarray, grayscale_cam: np.ndarray, use_rgb: bool = True) -> np.ndarray:
     heatmap = cv2.applyColorMap(np.uint8(255 * normalize_cam(grayscale_cam)), cv2.COLORMAP_JET)
     heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     overlay = 0.45 * heatmap + 0.55 * image_float_rgb
