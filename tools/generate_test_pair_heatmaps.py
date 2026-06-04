@@ -23,6 +23,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from PIL import Image, ImageDraw
 
@@ -30,22 +31,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from detect.obbHeapmap import ActivationsAndGradients, letterbox, yolov8_target  # noqa: E402
-from pytorch_grad_cam import EigenCAM, EigenGradCAM, GradCAM, GradCAMPlusPlus, LayerCAM, RandomCAM, XGradCAM  # noqa: E402
-from pytorch_grad_cam.utils.image import show_cam_on_image  # noqa: E402
 from ultralytics.nn.tasks import attempt_load_weights  # noqa: E402
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-CAM_METHODS = {
-    "GradCAM": GradCAM,
-    "GradCAMPlusPlus": GradCAMPlusPlus,
-    "XGradCAM": XGradCAM,
-    "EigenCAM": EigenCAM,
-    "LayerCAM": LayerCAM,
-    "RandomCAM": RandomCAM,
-    "EigenGradCAM": EigenGradCAM,
-}
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,13 +49,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="Random seed used when sampling pairs.")
     parser.add_argument("--imgsz", type=int, default=640, help="Letterbox size.")
     parser.add_argument("--device", default="cuda:0", help="Torch device, e.g. cuda:0 or cpu.")
-    parser.add_argument("--method", default="GradCAM", choices=sorted(CAM_METHODS), help="CAM method.")
+    parser.add_argument("--method", default="GradCAM", choices=("GradCAM",), help="CAM method. Currently supports GradCAM.")
     parser.add_argument("--layer", type=int, nargs="+", default=[20], help="Target model layer index/indices.")
     parser.add_argument("--backward-type", default="all", choices=("class", "box", "all"), help="Grad-CAM target type.")
     parser.add_argument("--conf-threshold", type=float, default=0.2, help="Target confidence threshold.")
     parser.add_argument("--ratio", type=float, default=0.02, help="Top prediction ratio used by Grad-CAM target.")
     parser.add_argument("--no-shuffle", action="store_true", help="Take the first N pairs instead of random sampling.")
     return parser.parse_args()
+
+
+def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scale_fill=False, scaleup=True, stride=32):
+    """Resize and pad image while meeting stride-multiple constraints."""
+    shape = im.shape[:2]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:
+        r = min(r, 1.0)
+
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
+    if auto:
+        dw, dh = np.mod(dw, stride), np.mod(dh, stride)
+    elif scale_fill:
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+
+    dw /= 2
+    dh /= 2
+    if shape[::-1] != new_unpad:
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    return cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
 
 
 def repo_fallback(path_like: str | Path | None) -> Path | None:
@@ -171,6 +187,112 @@ def build_pairs(rgb_source: Path, ir_source: Path, selected_list: Path | None) -
     return pairs
 
 
+def normalize_cam(cam: np.ndarray) -> np.ndarray:
+    cam = cam.astype(np.float32)
+    cam -= cam.min()
+    cam /= cam.max() + 1e-6
+    return cam
+
+
+def show_cam_on_image(image_float_rgb: np.ndarray, grayscale_cam: np.ndarray) -> np.ndarray:
+    heatmap = cv2.applyColorMap(np.uint8(255 * normalize_cam(grayscale_cam)), cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    overlay = 0.45 * heatmap + 0.55 * image_float_rgb
+    return np.uint8(255 * normalize_cam(overlay))
+
+
+class OBBGradTarget(torch.nn.Module):
+    """Scalar target for YOLO OBB outputs before NMS."""
+
+    def __init__(self, output_type: str, conf: float, ratio: float):
+        super().__init__()
+        self.output_type = output_type
+        self.conf = conf
+        self.ratio = ratio
+
+    def forward(self, model_output):
+        pred = model_output[0] if isinstance(model_output, (list, tuple)) else model_output
+        if pred.ndim != 3:
+            raise ValueError(f"Expected model output [B, C, N], got shape {tuple(pred.shape)}.")
+
+        logits = pred[:, 4:-1, :]
+        boxes = pred[:, :4, :]
+        rotate = pred[:, -1:, :]
+        scores, indices = torch.sort(logits.max(1)[0], descending=True)
+
+        cls_sorted = logits[0].transpose(0, 1)[indices[0]]
+        box_sorted = boxes[0].transpose(0, 1)[indices[0]]
+        rot_sorted = rotate[0].transpose(0, 1)[indices[0]]
+        box5_sorted = torch.cat((box_sorted, rot_sorted), dim=1)
+
+        limit = max(1, int(cls_sorted.size(0) * self.ratio))
+        values = []
+        for i in range(limit):
+            if float(scores[0, i].detach()) < self.conf:
+                break
+            if self.output_type in ("class", "all"):
+                values.append(cls_sorted[i].max())
+            if self.output_type in ("box", "all"):
+                values.extend(box5_sorted[i, j] for j in range(5))
+
+        if not values:
+            return scores[0, 0]
+        return sum(values)
+
+
+class SimpleGradCAM:
+    """Small Grad-CAM implementation for one or more convolutional target layers."""
+
+    def __init__(self, model: torch.nn.Module, target_layers: list[torch.nn.Module]):
+        self.model = model
+        self.target_layers = target_layers
+        self.activations = []
+        self.gradients = []
+        self.handles = []
+        for layer in target_layers:
+            self.handles.append(layer.register_forward_hook(self._save_activation))
+            self.handles.append(layer.register_forward_hook(self._save_gradient))
+
+    def _save_activation(self, _module, _inputs, output):
+        if isinstance(output, (list, tuple)):
+            output = output[0]
+        self.activations.append(output)
+
+    def _save_gradient(self, _module, _inputs, output):
+        if isinstance(output, (list, tuple)):
+            output = output[0]
+        if not hasattr(output, "requires_grad") or not output.requires_grad:
+            return
+        output.register_hook(lambda grad: self.gradients.insert(0, grad))
+
+    def __call__(self, tensor: torch.Tensor, target: torch.nn.Module) -> np.ndarray:
+        self.activations = []
+        self.gradients = []
+        self.model.zero_grad(set_to_none=True)
+        output = self.model(tensor)
+        loss = target(output)
+        loss.backward(retain_graph=True)
+
+        cams = []
+        out_h, out_w = tensor.shape[-2:]
+        for activation, gradient in zip(self.activations, reversed(self.gradients)):
+            weights = gradient.mean(dim=(2, 3), keepdim=True)
+            cam = (weights * activation).sum(dim=1, keepdim=True)
+            cam = F.relu(cam)
+            cam = F.interpolate(cam, size=(out_h, out_w), mode="bilinear", align_corners=False)
+            cams.append(cam[0, 0])
+
+        if not cams:
+            raise RuntimeError("No CAM activations were captured. Check --layer indices.")
+        cam = torch.stack(cams).mean(0)
+        cam = cam.detach().cpu().numpy()
+        return normalize_cam(cam)
+
+    def release(self) -> None:
+        for handle in self.handles:
+            handle.remove()
+
+
 def load_cam(args: argparse.Namespace):
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
     model = attempt_load_weights(args.weight, device)
@@ -179,13 +301,8 @@ def load_cam(args: argparse.Namespace):
         p.requires_grad_(True)
 
     target_layers = [model.model[i] for i in args.layer]
-    target = yolov8_target(args.backward_type, args.conf_threshold, args.ratio)
-    cam_cls = CAM_METHODS[args.method]
-    try:
-        cam = cam_cls(model, target_layers, use_cuda=device.type == "cuda")
-    except TypeError:
-        cam = cam_cls(model=model, target_layers=target_layers)
-    cam.activations_and_grads = ActivationsAndGradients(model, target_layers, None)
+    target = OBBGradTarget(args.backward_type, args.conf_threshold, args.ratio)
+    cam = SimpleGradCAM(model, target_layers)
     return model, cam, target, device
 
 
@@ -197,8 +314,8 @@ def read_pair_tensor(rgb_path: Path, ir_path: Path, imgsz: int, device: torch.de
     if ir_bgr is None:
         raise FileNotFoundError(f"Cannot read IR image: {ir_path}")
 
-    rgb = letterbox(rgb_bgr, new_shape=(imgsz, imgsz))[0]
-    ir = letterbox(ir_bgr, new_shape=(imgsz, imgsz))[0]
+    rgb = letterbox(rgb_bgr, new_shape=(imgsz, imgsz))
+    ir = letterbox(ir_bgr, new_shape=(imgsz, imgsz))
     rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     ir = cv2.cvtColor(ir, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     stacked = np.concatenate((rgb, ir), axis=2)
@@ -225,7 +342,7 @@ def save_pair_heatmap(
     device: torch.device,
 ) -> None:
     rgb, ir, tensor = read_pair_tensor(rgb_path, ir_path, imgsz, device)
-    grayscale_cam = cam(tensor, [target])[0]
+    grayscale_cam = cam(tensor, target)
 
     rgb_heatmap = show_cam_on_image(rgb, grayscale_cam, use_rgb=True)
     ir_heatmap = show_cam_on_image(ir, grayscale_cam, use_rgb=True)
