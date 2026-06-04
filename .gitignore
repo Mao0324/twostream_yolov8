@@ -1,5 +1,6 @@
 # Byte-compiled / optimized / DLL files
 outputs/
+state/
 *.pth
 *.png
 *.jpg

@@ -1,9 +1,0 @@
-{
-  "project_id": "assarifusion-architecture",
-  "active_next_prompt_path": "outputs/S7-final-joint-audit/guidance/next-prompt-S7-IMAGE_FINAL_REPAIR.md",
-  "active_next_public_step": "S7-FINAL-JOINT-AUDIT",
-  "active_next_substage": "IMAGE_FINAL_REPAIR",
-  "active_next_mode": "image_only",
-  "current_public_step_complete": false,
-  "current_public_step": "S7-FINAL-JOINT-AUDIT"
-}
