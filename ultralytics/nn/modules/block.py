@@ -49,6 +49,7 @@ __all__ = (
     "ASSARIFusion",
     "ARASSARIFusion",
     "CGARASSARIFusion",
+    "IRGuidedARASSARIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1946,6 +1947,31 @@ class ARASSARIFusion(nn.Module):
         ir_ar = ir + self.ir_ar(ir, rgb)
         delta_rgb = self.xattn(rgb_ar, ir_ar)
         delta_ir = self.xattn(ir_ar, rgb_ar)
+        rgb = rgb + self.scale_rgb * delta_rgb
+        ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class IRGuidedARASSARIFusion(nn.Module):
+    """IR-anchored ARASSA fusion that uses IR to refine RGB while keeping IR stable."""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.rgb_ar = CrossGuidedARDepthwiseConv(c, init_scale)
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        """Fuse RGB/IR features with IR as the anchor modality."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"IRGuidedARASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        rgb_ar = rgb + self.rgb_ar(rgb, ir)
+        delta_rgb = self.xattn(rgb_ar, ir)
+        delta_ir = self.xattn(ir, rgb_ar)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
         return torch.cat([rgb, ir], dim=1)
