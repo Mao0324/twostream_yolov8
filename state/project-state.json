@@ -1,0 +1,323 @@
+{
+  "project_id": "assarifusion-architecture",
+  "runtime": "codex",
+  "current_public_step": "S5-CANDIDATE-IMAGE",
+  "completed_public_steps": [
+    "S0-PAPER-FOUNDATION",
+    "S1-FIGURE-STRATEGY",
+    "S2-SKETCH-EXPLORE",
+    "S3-DIRECTION-SELECT",
+    "S4-CANDIDATE-BRIEF",
+    "S5-CANDIDATE-IMAGE",
+    "S6-FINAL-SELECT"
+  ],
+  "next_public_step": "S7-FINAL-JOINT-AUDIT",
+  "contract_check_mode": "final_only",
+  "first_round_contract_check": "off",
+  "second_round_contract_check": "off",
+  "s2_contract_repair_attempt_limit": 1,
+  "s0_foundation_readiness_state": {
+    "foundation_readiness_status": "S0_FOUNDATION_READY_WITH_RISK",
+    "proceed_with_known_risks": true,
+    "source_basis": "local_repository_code_yaml_dataset_training_logs",
+    "risk_register_path": "outputs/S0-paper-foundation/framework-figure-risk-register.md",
+    "paper_foundation_report_path": "outputs/S0-paper-foundation/paper-foundation-report.md",
+    "author_supplement_request_path": "outputs/S0-paper-foundation/author-supplement-request.md"
+  },
+  "registered_artifacts": {
+    "s0_input_inventory": "outputs/S0-paper-foundation/input-inventory.md",
+    "s0_paper_foundation_report": "outputs/S0-paper-foundation/paper-foundation-report.md",
+    "s0_risk_register": "outputs/S0-paper-foundation/framework-figure-risk-register.md",
+    "s0_author_supplement_request": "outputs/S0-paper-foundation/author-supplement-request.md",
+    "s0_to_s1_guidance": "outputs/S0-paper-foundation/guidance/next-prompt-S1-FIGURE-STRATEGY.md",
+    "s1_figure_strategy_report": "outputs/S1-figure-strategy/figure-strategy-report.md",
+    "s1_s2_sketch_candidate_cards": "outputs/S1-figure-strategy/s2-sketch-candidate-cards.md",
+    "s1_visual_semantics_and_contract": "outputs/S1-figure-strategy/visual-semantics-and-contract.md",
+    "s1_to_s2_text_prepare_guidance": "outputs/S1-figure-strategy/guidance/next-prompt-S2-TEXT_PREPARE.md",
+    "s2_stage_manifest": "outputs/S2-sketch-explore/stage-manifest.json",
+    "s2_common_sketch_brief": "outputs/S2-sketch-explore/common-sketch-brief.md",
+    "s2_candidate_run_registry": "outputs/S2-sketch-explore/candidate-run-registry.json",
+    "s2_image_generate_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c01-c08-next-user-prompt.md",
+    "s2_text_audit_guidance": "outputs/S2-sketch-explore/substage-guides/S2-02-text-audit-c01-c08-next-user-prompt.md",
+    "s2_transport_issue_mitigation": "outputs/S2-sketch-explore/transport-issue-mitigation.md",
+    "s2_image_generate_c02_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c02-next-user-prompt.md",
+    "s2_image_generate_c03_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c03-next-user-prompt.md",
+    "s2_image_generate_c04_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c04-next-user-prompt.md",
+    "s2_image_generate_c05_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c05-next-user-prompt.md",
+    "s2_image_generate_c06_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c06-next-user-prompt.md",
+    "s2_image_generate_c07_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c07-next-user-prompt.md",
+    "s2_image_generate_c08_guidance": "outputs/S2-sketch-explore/substage-guides/S2-01-image-generate-c08-next-user-prompt.md",
+    "s2_text_audit_report": "outputs/S2-sketch-explore/text-audit-report.md",
+    "s2_aggregate_checkpoint_guidance": "outputs/S2-sketch-explore/substage-guides/S2-99-text-aggregate-checkpoint-next-user-prompt.md",
+    "s2_aggregate_report": "outputs/S2-sketch-explore/aggregate-report.md",
+    "s2_checkpoint_manifest": "outputs/S2-sketch-explore/checkpoint-manifest.json",
+    "s2_to_s3_guidance": "outputs/S2-sketch-explore/substage-guides/next-prompt-S3-DIRECTION-SELECT.md",
+    "s3_stage_manifest": "outputs/S3-direction-select/stage-manifest.json",
+    "s3_direction_selection_report": "outputs/S3-direction-select/direction-selection-report.md",
+    "s3_to_s4_guidance": "outputs/S3-direction-select/guidance/next-prompt-S4-CANDIDATE-BRIEF.md",
+    "s4_stage_manifest": "outputs/S4-candidate-brief/stage-manifest.json",
+    "s4_candidate_brief_report": "outputs/S4-candidate-brief/candidate-brief-report.md",
+    "s4_formal_candidate_contracts": "outputs/S4-candidate-brief/formal-candidate-contracts.md",
+    "s4_s5_text_prepare_guidance": "outputs/S4-candidate-brief/guidance/next-prompt-S5-TEXT_PREPARE.md",
+    "s5_stage_manifest": "outputs/S5-candidate-image/stage-manifest.json",
+    "s5_candidate_run_registry": "outputs/S5-candidate-image/candidate-run-registry.json",
+    "s5_image_generate_guidance": "outputs/S5-candidate-image/substage-guides/S5-01-image-generate-c01-c06-next-user-prompt.md",
+    "s5_text_audit_guidance": "outputs/S5-candidate-image/substage-guides/S5-02-text-audit-c01-c06-next-user-prompt.md",
+    "s5_text_audit_report": "outputs/S5-candidate-image/text-audit-report.md",
+    "s5_aggregate_checkpoint_guidance": "outputs/S5-candidate-image/substage-guides/S5-99-text-aggregate-checkpoint-next-user-prompt.md",
+    "s5_aggregate_report": "outputs/S5-candidate-image/aggregate-report.md",
+    "s5_checkpoint_manifest": "outputs/S5-candidate-image/checkpoint-manifest.json",
+    "s5_to_s6_guidance": "outputs/S5-candidate-image/substage-guides/next-prompt-S6-FINAL-SELECT.md",
+    "s6_stage_manifest": "outputs/S6-final-selection/stage-manifest.json",
+    "s6_final_selection_report": "outputs/S6-final-selection/final-selection-report.md",
+    "s6_figure_text_package": "outputs/S6-final-selection/figure-text-package.md",
+    "s6_final_figure_contract": "outputs/S6-final-selection/final-figure-contract.md",
+    "s6_to_s7_guidance": "outputs/S6-final-selection/guidance/next-prompt-S7-FINAL-JOINT-AUDIT.md",
+    "s7_stage_manifest": "outputs/S7-final-joint-audit/stage-manifest.json",
+    "s7_final_audit_report": "outputs/S7-final-joint-audit/final-audit-report.md",
+    "s7_visible_edge_inventory": "outputs/S7-final-joint-audit/visible-edge-inventory.md",
+    "s7_final_repair_brief": "outputs/S7-final-joint-audit/s7-final-repair-brief.md",
+    "s7_text_final_audit_status": "outputs/S7-final-joint-audit/internal-runs/TEXT_FINAL_AUDIT/status.json",
+    "s7_text_final_audit_checkpoint_manifest": "outputs/S7-final-joint-audit/checkpoint-manifest.json",
+    "s7_image_final_repair_guidance": "outputs/S7-final-joint-audit/guidance/next-prompt-S7-IMAGE_FINAL_REPAIR.md"
+  },
+  "figure_scope": {
+    "type": "code_grounded_architecture_mechanism_figure",
+    "target_module": "ASSARIFusion",
+    "inputs": [
+      "RGB/visible",
+      "IR/infrared"
+    ],
+    "mandatory_core_details": [
+      "two-stream backbone",
+      "P3/P4/P5 same-scale fusion",
+      "ASSARIFusion split RGB and IR streams",
+      "bidirectional sparse cross-channel attention",
+      "Q from source and K/V from reference modality",
+      "residual scale gates",
+      "concat output and route to FPN/OBB head"
+    ]
+  },
+  "s1_figure_strategy_state": {
+    "status": "complete",
+    "selected_strategy": "main_framework_plus_ASSARIFusion_mechanism_detail_panel",
+    "reader_question": "How do RGB and IR features exchange channel information through sparse bidirectional cross-channel attention, and how does this interaction feed multi-scale OBB detection?",
+    "s2_candidate_count": 8,
+    "next_internal_substage": "TEXT_PREPARE"
+  },
+  "s2_sketch_explore_state": {
+    "status": "complete",
+    "completed_substages": [
+      "S2-00-text-prepare",
+      "S2-01-image-generate-c01",
+      "S2-01-image-generate-c02",
+      "S2-01-image-generate-c03",
+      "S2-01-image-generate-c04",
+      "S2-01-image-generate-c05",
+      "S2-01-image-generate-c06",
+      "S2-01-image-generate-c07",
+      "S2-01-image-generate-c08",
+      "S2-02-text-audit-c01-c08",
+      "S2-99-text-aggregate-checkpoint"
+    ],
+    "next_substage": null,
+    "candidate_count": 8,
+    "candidate_ids": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06",
+      "C07",
+      "C08"
+    ],
+    "repair_preauthorized": true,
+    "repair_attempt_limit_per_candidate": 1,
+    "images_generated": true,
+    "generated_candidate_ids": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06",
+      "C07",
+      "C08"
+    ],
+    "remaining_candidate_ids": [],
+    "transport_issue_mitigation": "single-candidate image-only substages",
+    "audited": true,
+    "audit_substage": "S2-02-text-audit-c01-c08",
+    "audit_report_path": "outputs/S2-sketch-explore/text-audit-report.md",
+    "candidate_status_counts": {
+      "PASS": 2,
+      "FLAG_MAJOR": 6
+    },
+    "repair_scheduled": false,
+    "repair_decision": "defer_to_aggregate_risk_transfer",
+    "aggregate_checkpoint_complete": true,
+    "aggregate_substage": "S2-99-text-aggregate-checkpoint",
+    "aggregate_report_path": "outputs/S2-sketch-explore/aggregate-report.md",
+    "checkpoint_manifest_path": "outputs/S2-sketch-explore/checkpoint-manifest.json",
+    "clean_visual_references_for_s3": [
+      "C02",
+      "C03"
+    ],
+    "risk_transfer_for_s4": [
+      "No P3 -> P4 -> P5 serial fusion chain.",
+      "No P5-only fusion input.",
+      "No direct RGB/IR stream bypass into FPN.",
+      "No P4/P5 variant label.",
+      "No softmax-only attention label when the source contract requires ReLU/nonnegative sparse attention."
+    ]
+  },
+  "s3_direction_select_state": {
+    "status": "complete",
+    "selected_refinement_direction": "split_stream_swimlane_main_framework_with_bottom_or_right_assarifusion_mechanism_panel",
+    "selected_visual_sources": [
+      "C03",
+      "C02"
+    ],
+    "secondary_visual_sources_for_s4_review": [
+      "C07",
+      "C08"
+    ],
+    "s4_prompt_risk_transfer_sources": [
+      "C02",
+      "C03",
+      "C07",
+      "C08"
+    ],
+    "report_path": "outputs/S3-direction-select/direction-selection-report.md",
+    "next_public_step": "S4-CANDIDATE-BRIEF"
+  },
+  "s4_candidate_brief_state": {
+    "status": "complete",
+    "formal_candidate_count": 6,
+    "formal_candidate_ids": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06"
+    ],
+    "selected_refinement_direction": "split_stream_swimlane_main_framework_with_bottom_or_right_assarifusion_mechanism_panel",
+    "s4_prompt_risk_transfer": [
+      "Retain C02/C03 clean same-scale swimlane and bottom mechanism strengths.",
+      "Retain C07 channel-attention callout only after removing serial fusion topology.",
+      "Retain C08 legend/output icon idea only after removing serial fusion topology and stream bypass arrows.",
+      "Forbid P3 -> P4 -> P5 serial fusion chains.",
+      "Forbid direct RGB/IR stream bypass arrows into FPN.",
+      "Forbid P4/P5 variant labels.",
+      "Forbid softmax-only attention labels; use ReLU/nonnegative sparse channel attention."
+    ],
+    "report_path": "outputs/S4-candidate-brief/candidate-brief-report.md",
+    "contracts_path": "outputs/S4-candidate-brief/formal-candidate-contracts.md",
+    "next_public_step": "S5-CANDIDATE-IMAGE",
+    "next_internal_substage": "TEXT_PREPARE"
+  },
+  "s5_candidate_image_state": {
+    "status": "complete",
+    "completed_substages": [
+      "S5-00-text-prepare",
+      "S5-01-image-generate-c01-c06",
+      "S5-02-text-audit-c01-c06",
+      "S5-99-text-aggregate-checkpoint"
+    ],
+    "next_substage": null,
+    "candidate_count": 6,
+    "candidate_ids": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06"
+    ],
+    "repair_preauthorized": false,
+    "repair_attempt_limit_per_candidate": 1,
+    "images_generated": true,
+    "generated_candidate_ids": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06"
+    ],
+    "remaining_candidate_ids": [],
+    "audited": true,
+    "audit_substage": "S5-02-text-audit-c01-c06",
+    "audit_report_path": "outputs/S5-candidate-image/text-audit-report.md",
+    "candidate_status_counts": {
+      "PASS": 0,
+      "FLAG_MINOR": 0,
+      "FLAG_MAJOR": 6,
+      "BLOCKED": 0
+    },
+    "repair_scheduled": false,
+    "aggregate_checkpoint_complete": true,
+    "aggregate_substage": "S5-99-text-aggregate-checkpoint",
+    "aggregate_report_path": "outputs/S5-candidate-image/aggregate-report.md",
+    "checkpoint_manifest_path": "outputs/S5-candidate-image/checkpoint-manifest.json",
+    "aggregate_checkpoint_guidance": "outputs/S5-candidate-image/substage-guides/S5-99-text-aggregate-checkpoint-next-user-prompt.md",
+    "risk_carry_forward_for_s6": [
+      "All S5 formal candidates preserve formal style and visible ASSARIFusion mechanisms.",
+      "All S5 formal candidates are FLAG_MAJOR because at least one S4 negative connector or label risk remains.",
+      "Common S6 risk carry-forward: forbid P3 -> P4 -> P5 serial fusion.",
+      "Common S6 risk carry-forward: forbid direct RGB/IR stream bypass arrows into FPN.",
+      "Common S6 risk carry-forward: forbid P4/P5 variant labels.",
+      "Common S6 risk carry-forward: avoid N = H x W matrix notation when the intended mechanism is sparse cross-channel attention."
+    ],
+    "next_public_step": "S6-FINAL-SELECT"
+  },
+  "s6_final_select_state": {
+    "status": "complete",
+    "selected_reference_candidate": "C03",
+    "selected_reference_status": "FLAG_MAJOR",
+    "selected_reference_image": "outputs/S5-candidate-image/candidates/C03/image-v01.png",
+    "selection_policy": "high_risk_reference_with_strict_s7_contract",
+    "report_path": "outputs/S6-final-selection/final-selection-report.md",
+    "figure_text_package_path": "outputs/S6-final-selection/figure-text-package.md",
+    "final_figure_contract_path": "outputs/S6-final-selection/final-figure-contract.md",
+    "s5_risk_preserved": true,
+    "risk_carry_forward_to_s7": [
+      "Selected reference C03 remains FLAG_MAJOR.",
+      "S7 must not accept P3 -> P4 -> P5 serial fusion.",
+      "S7 must not accept direct RGB/IR stream bypass into FPN.",
+      "S7 must not accept P4/P5 variant labels.",
+      "S7 must not accept ASSA expansion.",
+      "S7 must not accept spatial-only attention or N = H x W matrix notation as the primary cross-channel attention explanation.",
+      "S7 must not accept ASSARIFusion C-channel collapse without concat [B,2C,H,W] or refined RGB/IR streams."
+    ],
+    "next_public_step": "S7-FINAL-JOINT-AUDIT",
+    "next_internal_unit": "TEXT_FINAL_AUDIT"
+  },
+  "s7_final_joint_audit_state": {
+    "status": "in_progress",
+    "completed_internal_units": [
+      "TEXT_FINAL_AUDIT"
+    ],
+    "current_internal_unit": "TEXT_FINAL_AUDIT",
+    "next_internal_unit": "IMAGE_FINAL_REPAIR",
+    "latest_pending_image_path": "outputs/S5-candidate-image/candidates/C03/image-v01.png",
+    "pending_image_materialization": "selected_reference_used_directly_for_text_audit_no_image_copy_created",
+    "final_audit_verdict": "S7-INTERNAL-REPAIR",
+    "repair_attempts_used": 0,
+    "max_repair_attempts": 3,
+    "final_audit_report_path": "outputs/S7-final-joint-audit/final-audit-report.md",
+    "visible_edge_inventory_path": "outputs/S7-final-joint-audit/visible-edge-inventory.md",
+    "repair_brief_path": "outputs/S7-final-joint-audit/s7-final-repair-brief.md",
+    "checkpoint_manifest_path": "outputs/S7-final-joint-audit/checkpoint-manifest.json",
+    "next_guidance_path": "outputs/S7-final-joint-audit/guidance/next-prompt-S7-IMAGE_FINAL_REPAIR.md",
+    "s7_complete": false
+  },
+  "next_prompt_registry": {
+    "active_next_prompt_path": "outputs/S7-final-joint-audit/guidance/next-prompt-S7-IMAGE_FINAL_REPAIR.md",
+    "active_next_public_step": "S7-FINAL-JOINT-AUDIT",
+    "active_next_substage": "IMAGE_FINAL_REPAIR",
+    "active_next_mode": "image_only"
+  }
+}
