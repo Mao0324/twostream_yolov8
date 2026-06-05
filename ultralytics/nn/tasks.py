@@ -57,6 +57,7 @@ from ultralytics.nn.modules import (
     IRGuidedARASSARIFusion,
     ASSARIFusion,
     ASSARefine,
+    ScaledP3Preserve,
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -1077,6 +1078,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c2, *args]
         elif m is ASSARefine:
             c2 = ch[f]
+            args = [c2, *args]
+        elif m is ScaledP3Preserve:
+            c2 = ch[f[0]]
+            assert ch[f[0]] == ch[f[1]], f"ScaledP3Preserve input channels must match, got {ch[f[0]]} and {ch[f[1]]}"
             args = [c2, *args]
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]

@@ -1,0 +1,452 @@
+下面按当前 baseline YAML 和代码讲 ASSARIFusion 的完整数据流：双模态输入 -> 两路 backbone -> ASSARIFusion 双向跨模态修
+  正 -> ADD 合成单路特征 -> 送入 FPN/OBB Head。
+
+  1. 输入拆成 RGB / IR 两路
+
+  模型 forward 一开始把输入 x 按通道切成两半：
+
+  rgb, ir = torch.chunk(x, chunks=2, dim=1)
+
+  见 ultralytics/nn/tasks.py:159。
+
+  也就是说，假设输入是双流拼接后的张量：
+
+  x: [B, 6, H, W]
+
+  那么会被拆成：
+
+  rgb: [B, 3, H, W]
+  ir : [B, 3, H, W]
+
+  之后代码维护两个变量：rgb 和 ir。它们分别沿 RGB 分支、IR 分支往前走。
+
+  2. 两个模态分别经过 backbone
+
+  以 baseline 配置为例：
+  yaml/yolov8_twostream_obb_assafusion_postc2f.yaml:13
+
+  RGB 分支大致是：
+
+  RGB input
+  -> Conv P1/2
+  -> Conv P2/4
+  -> C2f
+  -> Conv P3/8
+  -> C2f P3
+
+  IR 分支大致是：
+
+  IR input
+  -> Conv P1/2
+  -> Conv P2/4
+  -> C2f_Faster
+  -> Conv P3/8
+  -> C2f_Faster P3
+
+  在每个融合点之前，两个模态特征的空间尺寸和通道数是对齐的。例如 P3 融合前：
+
+  rgb_p3: [B, C, H/8,  W/8]
+  ir_p3 : [B, C, H/8,  W/8]
+
+  P4 融合前：
+
+  rgb_p4: [B, C, H/16, W/16]
+  ir_p4 : [B, C, H/16, W/16]
+
+  P5 融合前：
+
+  rgb_p5: [B, C, H/32, W/32]
+  ir_p5 : [B, C, H/32, W/32]
+
+  YAML 中三处 ASSARIFusion 分别在：
+
+  - [-3, 1, ASSARIFusion, [256, 8, 4, True]]  # P3
+  - [-3, 1, ASSARIFusion, [512, 8, 4, True]]  # P4
+  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]] # P5
+
+  见 yaml/yolov8_twostream_obb_assafusion_postc2f.yaml:26。
+
+  3. -3 触发双流融合
+
+  在这个工程里，YAML 的 from=-3 是特殊逻辑。forward 遇到 m.f == -3 时，会把当前的 rgb 和 ir 拼接起来：
+
+  x3 = torch.cat([rgb, ir], dim=1)
+  x3 = m(x3)
+  rgb, ir = torch.chunk(x3, 2, dim=1)
+  x = [rgb, ir]
+
+  见 ultralytics/nn/tasks.py:217。
+
+  所以 ASSARIFusion 的输入不是两个独立参数，而是一个拼接张量：
+
+  x3: [B, 2C, H, W]
+
+  其中前一半通道是 RGB，后一半通道是 IR。
+
+  4. ASSARIFusion 内部第一步：拆回 RGB / IR
+
+  实现见 ultralytics/nn/modules/block.py:1906。
+
+  核心代码：
+
+  rgb, ir = torch.chunk(x, chunks=2, dim=1)
+
+  输入：
+
+  x:   [B, 2C, H, W]
+
+  拆成：
+
+  rgb: [B, C, H, W]
+  ir : [B, C, H, W]
+
+  然后检查通道数是否符合 self.c：
+
+  if rgb.shape[1] != self.c:
+      raise ValueError(...)
+
+  5. ASSARIFusion 的核心：双向跨模态注意力
+
+  代码是：
+
+  delta_rgb = self.xattn(rgb, ir)
+  delta_ir = self.xattn(ir, rgb)
+
+  含义是：
+
+  delta_rgb = 用 IR 作为参考，生成给 RGB 的修正量
+  delta_ir  = 用 RGB 作为参考，生成给 IR 的修正量
+
+  这里的 self.xattn 是：
+
+  SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+
+  也就是说，ASSARIFusion 不是简单 concat，也不是直接相加，而是先计算两个方向的跨模态补偿：
+
+  RGB <- IR
+  IR  <- RGB
+
+  它是对称的。
+
+  6. SparseCrossChannelAttention2d 具体怎么算
+
+  实现见 ultralytics/nn/modules/block.py:1644。
+
+  假设调用：
+
+  delta_rgb = self.xattn(rgb, ir)
+
+  那么：
+
+  src = rgb
+  ref = ir
+
+  也就是 RGB 是被修正对象，IR 是参考模态。
+
+  第一步，分别做 LayerNorm：
+
+  q = self.q_proj(self.norm_src(src))
+  kv = self.kv_proj(self.norm_ref(ref))
+
+  这里：
+
+  src: [B, C, H, W]
+  ref: [B, C, H, W]
+
+  经过 1x1 卷积降维后：
+
+  q : [B, hidden, H, W]
+  kv: [B, hidden, H, W]
+
+  其中：
+
+  hidden = max(8, c // reduction)
+
+  默认 reduction=8，所以 hidden 通常是 C/8。
+
+  第二步，给 Q 和 KV 加一个 depthwise 3x3 局部卷积：
+
+  q = q + self.q_dw(q)
+  kv = kv + self.kv_dw(kv)
+
+  这一步的作用是：
+  在做跨模态通道注意力之前，先注入一点局部空间上下文。
+
+  第三步，reshape 成多头形式：
+
+  q = q.reshape(b, heads, dim, h * w)
+  k = kv.reshape(b, heads, dim, h * w)
+  v = k
+
+  形状变成：
+
+  q: [B, heads, dim, HW]
+  k: [B, heads, dim, HW]
+  v: [B, heads, dim, HW]
+
+  注意这里不是传统 Transformer 那种 HW x HW 的空间注意力。
+  这里计算的是更偏向 通道维/隐空间维之间的相关性：
+
+  attn = torch.matmul(q, k.transpose(-2, -1))
+
+  结果形状：
+
+  attn: [B, heads, dim, dim]
+
+  也就是每个 head 内，hidden channel 之间的跨模态相关矩阵。
+
+  第四步，归一化并稀疏化：
+
+  q = F.normalize(q, dim=-1)
+  k = F.normalize(k, dim=-1)
+  attn = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
+  attn = F.relu(attn)
+  attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+
+  这里有几个重点：
+
+  - F.normalize(..., dim=-1)：沿空间位置 HW 做归一化，计算的是空间分布相似性。
+  - matmul(q, k^T)：得到 src/ref 在隐通道维上的相关性。
+  - ReLU：负相关直接压成 0，所以叫 sparse。
+  - norm_attn=True 时，每行注意力归一化，避免数值发散。
+  - temperature 是可学习参数，可以调节注意力强度。
+
+  第五步，用注意力矩阵作用到 v：
+
+  out = torch.matmul(attn, v)
+
+  形状还是：
+
+  out: [B, heads, dim, HW]
+
+  再 reshape 回特征图：
+
+  out: [B, hidden, H, W]
+
+  最后通过 1x1 卷积投影回原通道数：
+
+  return self.out_proj(out)
+
+  所以最终：
+
+  delta_rgb: [B, C, H, W]
+
+  这个 delta_rgb 可以理解为：
+
+  > IR 模态根据自己和 RGB 的跨模态隐通道相关性，生成的一份 RGB 修正特征。
+
+  同理：
+
+  delta_ir = self.xattn(ir, rgb)
+
+  就是：
+
+  > RGB 模态根据自己和 IR 的跨模态隐通道相关性，生成的一份 IR 修正特征。
+
+  7. 残差更新：不是替换特征，而是小幅修正
+
+  ASSARIFusion 里更新方式是：
+
+  rgb = rgb + self.scale_rgb * delta_rgb
+  ir = ir + self.scale_ir * delta_ir
+
+  其中：
+
+  self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+  self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+  默认 init_scale=1e-3。
+
+  这点很重要：
+  ASSARIFusion 初始时非常接近 identity，不会一开始就大幅破坏原 backbone 特征。
+
+  初始阶段近似是：
+
+  rgb' ≈ rgb + 0.001 * delta_rgb
+  ir'  ≈ ir  + 0.001 * delta_ir
+
+  训练过程中，scale_rgb 和 scale_ir 会被学习。如果某个方向的跨模态修正有用，对应 scale 会被优化到更合适的值。
+
+  所以 ASSARIFusion 的设计比较保守：
+
+  保留原模态主干特征
+  + 小幅加入对方模态提供的补偿信息
+
+  8. 输出仍然是双流拼接
+
+  最后：
+
+  return torch.cat([rgb, ir], dim=1)
+
+  输出形状：
+
+  [B, 2C, H, W]
+
+  然后在 tasks.py 里又被拆回：
+
+  rgb, ir = torch.chunk(x3, 2, dim=1)
+  x = [rgb, ir]
+
+  也就是说，ASSARIFusion 后，模型内部仍然保留两条流：
+
+  rgb' : [B, C, H, W]
+  ir'  : [B, C, H, W]
+
+  不是立刻合成单流。
+
+  9. P3 / P4 / P5 三个融合点
+
+  baseline 一共做三次 ASSARIFusion。
+
+  P3：
+
+  rgb_p3, ir_p3
+  -> ASSARIFusion
+  -> rgb_p3', ir_p3'
+
+  P4：
+
+  rgb_p4, ir_p4
+  -> ASSARIFusion
+  -> rgb_p4', ir_p4'
+
+  P5：
+
+  rgb_p5, ir_p5
+  -> ASSARIFusion
+  -> rgb_p5', ir_p5'
+
+  其中 P5 是在 RGB/IR 各自经过 SPPF 后再融合：
+
+  - [-4, 1, SPPF, [1024, 5]] # RGB
+  - [-4, 1, SPPF, [1024, 5]] # IR
+  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]]
+
+  见 yaml/yolov8_twostream_obb_assafusion_postc2f.yaml:38。
+
+  10. 送到 FPN 前：ADD 把双流变成单流
+
+  ASSARIFusion 输出后，YAML 紧接着有三层 ADD：
+
+  - [10, 1, ADD, [1]] # 23 P3 to FPN
+  - [15, 1, ADD, [1]] # 24 P4 to FPN
+  - [22, 1, ADD, [1]] # 25 P5 to FPN
+
+  见 yaml/yolov8_twostream_obb_assafusion_postc2f.yaml:42。
+
+  ADD 实现很简单：
+
+  return torch.add(x[0], x[1])
+
+  见 ultralytics/nn/modules/block.py:1615。
+
+  因为前面保存的是：
+
+  x = [rgb', ir']
+
+  所以 ADD 做的是：
+
+  F_p3 = rgb_p3' + ir_p3'
+  F_p4 = rgb_p4' + ir_p4'
+  F_p5 = rgb_p5' + ir_p5'
+
+  这一步才是真正把双流合成单流特征。
+
+  合成后形状是：
+
+  F_p3: [B, C3, H/8,  W/8]
+  F_p4: [B, C4, H/16, W/16]
+  F_p5: [B, C5, H/32, W/32]
+
+  注意不是 [B, 2C, H, W]，而是加和后的 [B, C, H, W]。
+
+  11. FPN / PAN Head 如何使用这三个特征
+
+  FPN 从 P5 开始：
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 24], 1, Concat, [1]]
+  - [-1, 3, C2f, [512]]
+
+  也就是：
+
+  F_p5 上采样
+  concat F_p4
+  C2f 得到 Head-P4 特征
+
+  然后继续：
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 23], 1, Concat, [1]]
+  - [-1, 3, C2f, [256]]
+
+  也就是：
+
+  Head-P4 上采样
+  concat F_p3
+  C2f 得到 Head-P3 特征
+
+  接着 PAN 自底向上：
+
+  Head-P3 下采样 -> concat Head-P4 -> C2f
+  Head-P4 下采样 -> concat F_p5 -> C2f
+
+  最后 OBB 检测头使用三尺度输出：
+
+  - [[31, 34, 37], 1, OBB, [nc, 1]]
+
+  也就是：
+
+  P3 detection feature: layer 31
+  P4 detection feature: layer 34
+  P5 detection feature: layer 37
+
+  12. 用公式总结整个 ASSARIFusion 到 FPN 的过程
+
+  对任意层级 l ∈ {P3, P4, P5}：
+
+  输入双流特征：
+
+  R_l = RGB feature
+  I_l = IR feature
+
+  拼接送入 ASSARIFusion：
+
+  X_l = Concat(R_l, I_l)
+
+  模块内部：
+
+  ΔR_l = ASSA_Attn(src=R_l, ref=I_l)
+  ΔI_l = ASSA_Attn(src=I_l, ref=R_l)
+
+  R_l' = R_l + α_rgb * ΔR_l
+  I_l' = I_l + α_ir  * ΔI_l
+
+  输出双流：
+
+  X_l' = Concat(R_l', I_l')
+
+  送 FPN 前 ADD：
+
+  F_l = R_l' + I_l'
+
+  最终：
+
+  F_p3, F_p4, F_p5 -> FPN/PAN -> OBB Head
+
+  13. 这个模块的实际作用
+
+  ASSARIFusion 的作用不是粗暴融合，而是：
+
+  先保持 RGB / IR 两条流独立表达
+  再用对方模态生成一个残差补偿
+  最后才把补偿后的双流相加送入 FPN
+
+  它有三个关键特征：
+
+  - 双向性：RGB 被 IR 修正，IR 也被 RGB 修正。
+  - 稀疏跨模态注意力：只保留正相关的跨模态隐通道关系。
+  - 小尺度残差注入：scale_rgb / scale_ir 初始为 1e-3，训练初期接近原始双流 backbone，稳定性较好。
+
+  这也是为什么 baseline 可能比更激进的 ARASSA/CGARASSA 稳：原始 ASSARIFusion 对两个模态的改动幅度更保守，送进 FPN 的
+  F_p3/F_p4/F_p5 更接近 backbone 已经学到的稳定特征。

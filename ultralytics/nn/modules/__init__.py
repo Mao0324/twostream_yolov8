@@ -55,6 +55,7 @@ from .block import (
     IRGuidedARASSARIFusion,
     ASSARIFusion,
     ASSARefine,
+    ScaledP3Preserve,
     SimAM,
     ShuffleAttention,
     GAM_Attention,
@@ -177,4 +178,5 @@ __all__ = (
     "IRGuidedARASSARIFusion",
     "ASSARIFusion",
     "ASSARefine",
+    "ScaledP3Preserve",
 )

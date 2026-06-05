@@ -51,6 +51,7 @@ __all__ = (
     "CGARASSARIFusion",
     "IRGuidedARASSARIFusion",
     "ASSARefine",
+    "ScaledP3Preserve",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -2011,6 +2012,28 @@ class ASSARefine(nn.Module):
         """Refine a single feature tensor."""
         return x + self.scale * self.xattn(x, x)
 
+
+
+class ScaledP3Preserve(nn.Module):
+    """Preserve original P3 details with a learnable residual scale."""
+
+    def __init__(self, c, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """Fuse [neck_p3, original_p3] with a small learnable residual."""
+        if not isinstance(x, (list, tuple)) or len(x) != 2:
+            raise ValueError("ScaledP3Preserve expects a list or tuple of two tensors.")
+        neck_p3, original_p3 = x
+        if neck_p3.shape != original_p3.shape:
+            raise ValueError(
+                f"ScaledP3Preserve expects matching shapes, got {neck_p3.shape} and {original_p3.shape}."
+            )
+        if neck_p3.shape[1] != self.c:
+            raise ValueError(f"ScaledP3Preserve expected {self.c} channels, got {neck_p3.shape[1]}.")
+        return neck_p3 + self.scale * original_p3
 
 
 class BottleneckCSP(nn.Module):
