@@ -41,8 +41,10 @@ __all__ = (
     "ADD",
     "LayerNorm2d",
     "SparseCrossChannelAttention2d",
+    "SparseDenseLiteCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
+    "ASSASparseDenseLiteRIFusion",
     "ASSARefine",
     "SimAM",
     "ShuffleAttention",
@@ -1685,6 +1687,62 @@ class SparseCrossChannelAttention2d(nn.Module):
         return self.out_proj(out)
 
 
+class SparseDenseLiteCrossChannelAttention2d(nn.Module):
+    """Learnable sparse+dense channel attention from ref to src, both [B, C, H, W]."""
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_sparse_weight=0.3):
+        super().__init__()
+        hidden = max(8, c // reduction)
+        heads = max(1, min(int(heads), hidden))
+        while hidden % heads != 0 and heads > 1:
+            heads -= 1
+
+        self.c = c
+        self.hidden = hidden
+        self.heads = heads
+        self.dim = hidden // heads
+        self.norm_attn = norm_attn
+        self.last_sparsity = None
+
+        self.norm_src = LayerNorm2d(c)
+        self.norm_ref = LayerNorm2d(c)
+        self.q_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.kv_proj = nn.Conv2d(c, hidden, 1, bias=False)
+        self.q_dw = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
+        self.kv_dw = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
+        self.out_proj = nn.Conv2d(hidden, c, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+
+        init_sparse_weight = float(min(max(init_sparse_weight, 1e-4), 1.0 - 1e-4))
+        self.sparse_logit = nn.Parameter(torch.logit(torch.tensor(init_sparse_weight)))
+
+    def forward(self, src, ref):
+        """Return attention delta with shape [B, C, H, W]."""
+        b, _, h, w = src.shape
+        q = self.q_proj(self.norm_src(src))
+        q = q + self.q_dw(q)
+        kv = self.kv_proj(self.norm_ref(ref))
+        kv = kv + self.kv_dw(kv)
+
+        q = q.reshape(b, self.heads, self.dim, h * w)
+        k = kv.reshape(b, self.heads, self.dim, h * w)
+        v = k
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+
+        score = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
+        sparse_attn = F.relu(score)
+        if self.norm_attn:
+            sparse_attn = sparse_attn / (sparse_attn.sum(dim=-1, keepdim=True) + 1e-6)
+        dense_attn = torch.softmax(score, dim=-1)
+        sparse_weight = torch.sigmoid(self.sparse_logit)
+        attn = sparse_weight * sparse_attn + (1.0 - sparse_weight) * dense_attn
+        self.last_sparsity = (sparse_attn <= 1e-6).float().mean().detach()
+
+        out = torch.matmul(attn, v).reshape(b, self.hidden, h, w)
+        return self.out_proj(out)
+
+
 class ASSAAdd(nn.Module):
     """ASSA-style RGB/IR add fusion, input list of two [B, C, H, W], output [B, C, H, W]."""
 
@@ -1725,6 +1783,44 @@ class ASSARIFusion(nn.Module):
         delta_ir = self.xattn(ir, rgb)
         rgb = rgb + self.scale_rgb * delta_rgb
         ir = ir + self.scale_ir * delta_ir
+        return torch.cat([rgb, ir], dim=1)
+
+
+class ASSASparseDenseLiteRIFusion(nn.Module):
+    """ASSA RI fusion with learnable sparse+dense attention and positive residual scales."""
+
+    def __init__(
+        self,
+        c,
+        reduction=8,
+        heads=4,
+        norm_attn=True,
+        init_sparse_weight=0.3,
+        init_scale=1e-3,
+        scale_floor=1e-4,
+    ):
+        super().__init__()
+        self.c = c
+        self.scale_floor = float(scale_floor)
+        self.xattn = SparseDenseLiteCrossChannelAttention2d(c, reduction, heads, norm_attn, init_sparse_weight)
+
+        scale_init = max(float(init_scale) - self.scale_floor, 1e-6)
+        raw_scale = torch.log(torch.expm1(torch.tensor(scale_init)))
+        self.raw_scale_rgb = nn.Parameter(raw_scale.clone())
+        self.raw_scale_ir = nn.Parameter(raw_scale.clone())
+
+    def _scale(self, raw_scale):
+        return self.scale_floor + F.softplus(raw_scale)
+
+    def forward(self, x):
+        """Fuse concatenated RGB/IR feature tensor."""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSASparseDenseLiteRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+        delta_rgb = self.xattn(rgb, ir)
+        delta_ir = self.xattn(ir, rgb)
+        rgb = rgb + self._scale(self.raw_scale_rgb) * delta_rgb
+        ir = ir + self._scale(self.raw_scale_ir) * delta_ir
         return torch.cat([rgb, ir], dim=1)
 
 
