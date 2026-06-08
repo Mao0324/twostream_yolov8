@@ -188,10 +188,7 @@ class OBBClsEnhance(OBB):
         self.cls_enhance = nn.ModuleList(
             ClsEnhanceBlock(c) if i in self.enhance_layers else nn.Identity() for i, c in enumerate(ch)
         )
-        self.cls_enhance_scale = nn.ParameterList(
-            nn.Parameter(torch.ones(1) * init_scale) if i in self.enhance_layers else nn.Parameter(torch.zeros(1))
-            for i in range(self.nl)
-        )
+        self.cls_enhance_scale = nn.Parameter(torch.ones(self.nl) * init_scale)
 
     def forward(self, x):
         """Concatenate box, enhanced cls, and angle predictions."""
