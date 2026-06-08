@@ -14,6 +14,7 @@ from ultralytics.nn.modules import (
     C3,
     C3TR,
     OBB,
+    OBBClsEnhance,
     SPP,
     SPPELAN,
     SPPF,
@@ -1149,7 +1150,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn}:
+        elif m in {Detect, WorldDetect, Segment, Pose, OBB, OBBClsEnhance, ImagePoolingAttn}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
@@ -1267,7 +1268,7 @@ def guess_model_task(model):
             return "segment"
         if m == "pose":
             return "pose"
-        if m == "obb":
+        if m in {"obb", "obbclsenhance"}:
             return "obb"
 
     # Guess from model cfg

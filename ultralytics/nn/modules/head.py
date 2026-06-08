@@ -10,11 +10,11 @@ from torch.nn.init import constant_, xavier_uniform_
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
 
 from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto
-from .conv import Conv
+from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "OBBClsEnhance", "RTDETRDecoder"
 
 
 class Detect(nn.Module):
@@ -149,6 +149,90 @@ class OBB(Detect):
     def decode_bboxes(self, bboxes, anchors):
         """Decode rotated bounding boxes."""
         return dist2rbox(bboxes, self.angle, anchors, dim=1)
+
+
+class ECA2d(nn.Module):
+    """Efficient channel attention for one feature map."""
+
+    def __init__(self, c, gamma=2, b=1):
+        super().__init__()
+        k = int(abs((math.log(c, 2) + b) / gamma))
+        kernel_size = k if k % 2 else k + 1
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=kernel_size // 2, bias=False)
+        self.act = nn.Sigmoid()
+
+    def forward(self, x):
+        y = self.pool(x).view(x.size(0), 1, x.size(1))
+        y = self.act(self.conv(y)).view(x.size(0), x.size(1), 1, 1)
+        return x * y
+
+
+class ClsEnhanceBlock(nn.Module):
+    """Lightweight classification-only enhancement block."""
+
+    def __init__(self, c):
+        super().__init__()
+        self.block = nn.Sequential(DWConv(c, c, 3), Conv(c, c, 1), ECA2d(c))
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class OBBClsEnhance(OBB):
+    """OBB head with lightweight enhancement applied only before selected cls branches."""
+
+    def __init__(self, nc=80, ne=1, enhance_layers=(0, 1), init_scale=1e-3, ch=()):
+        super().__init__(nc, ne, ch)
+        self.enhance_layers = set(int(i) for i in enhance_layers)
+        self.cls_enhance = nn.ModuleList(
+            ClsEnhanceBlock(c) if i in self.enhance_layers else nn.Identity() for i, c in enumerate(ch)
+        )
+        self.cls_enhance_scale = nn.ParameterList(
+            nn.Parameter(torch.ones(1) * init_scale) if i in self.enhance_layers else nn.Parameter(torch.zeros(1))
+            for i in range(self.nl)
+        )
+
+    def forward(self, x):
+        """Concatenate box, enhanced cls, and angle predictions."""
+        bs = x[0].shape[0]
+        angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
+        angle = (angle.sigmoid() - 0.25) * math.pi
+        if not self.training:
+            self.angle = angle
+
+        for i in range(self.nl):
+            cls_feat = x[i]
+            if i in self.enhance_layers:
+                cls_feat = cls_feat + self.cls_enhance_scale[i] * self.cls_enhance[i](cls_feat)
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](cls_feat)), 1)
+
+        if self.training:
+            return x, angle
+
+        shape = x[0].shape
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.shape = shape
+
+        if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
+        else:
+            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+
+        if self.export and self.format in {"tflite", "edgetpu"}:
+            grid_h = shape[2]
+            grid_w = shape[3]
+            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            norm = self.strides / (self.stride[0] * grid_size)
+            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+        else:
+            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+
+        y = torch.cat((dbox, cls.sigmoid()), 1)
+        return torch.cat([y, angle], 1) if self.export else (torch.cat([y, angle], 1), (x, angle))
 
 
 class Pose(Detect):
