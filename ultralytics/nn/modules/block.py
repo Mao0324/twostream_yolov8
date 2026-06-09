@@ -1784,10 +1784,20 @@ class ASSARIFusion(nn.Module):
 class ASSADualBranchRIFusion(nn.Module):
     """面向双流检测的 ASSA/AST 双分支通道跨模态融合模块，输入/输出均为 [B, 2C, H, W]。"""
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(
+        self,
+        c,
+        reduction=8,
+        heads=4,
+        norm_attn=True,
+        init_scale=1e-3,
+        scale_floor=1e-4,
+        local_init_scale=1e-3,
+    ):
         super().__init__()
         self.c = c
-        # 第一步：模态内局部增强，1x1 对齐后接静态 3x3 深度卷积。
+        self.scale_floor = float(scale_floor)
+        # 第一步：模态内局部残差增强，避免直接替换原始模态特征。
         self.rgb_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
         self.ir_local = nn.Sequential(Conv(c, c, 1), DWConv(c, c, 3))
         # 第二步：同一个通道 SparseAttention 模块双向复用，实现参数共享。
@@ -1800,8 +1810,14 @@ class ASSADualBranchRIFusion(nn.Module):
             nn.BatchNorm2d(c),
         )
         self.out_proj = Conv(c, 2 * c, 1)
-        # 继承原分支的小尺度残差注入，便于从双流预训练权重稳定起训。
-        self.scale = nn.Parameter(torch.ones(1) * init_scale)
+        # 小尺度正向残差注入，避免融合分支学成负向抑制。
+        scale_init = max(float(init_scale) - self.scale_floor, 1e-6)
+        local_scale_init = max(float(local_init_scale) - self.scale_floor, 1e-6)
+        self.raw_scale = nn.Parameter(torch.log(torch.expm1(torch.tensor(scale_init))))
+        self.raw_local_scale = nn.Parameter(torch.log(torch.expm1(torch.tensor(local_scale_init))))
+
+    def _positive_scale(self, raw_scale):
+        return self.scale_floor + F.softplus(raw_scale)
 
     def forward(self, x):
         """Fuse concatenated RGB/IR feature tensor with sparse+dense channel cross attention."""
@@ -1809,15 +1825,16 @@ class ASSADualBranchRIFusion(nn.Module):
         if rgb.shape[1] != self.c:
             raise ValueError(f"ASSADualBranchRIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
 
-        rgb_local = self.rgb_local(rgb)
-        ir_local = self.ir_local(ir)
+        local_scale = self._positive_scale(self.raw_local_scale)
+        rgb_local = rgb + local_scale * self.rgb_local(rgb)
+        ir_local = ir + local_scale * self.ir_local(ir)
         attn_rgb_from_ir = self.xattn(rgb_local, ir_local)
         attn_ir_from_rgb = self.xattn(ir_local, rgb_local)
 
         fused = self.fuse(torch.cat([rgb_local, ir_local, attn_rgb_from_ir, attn_ir_from_rgb], dim=1))
         f1, f2 = torch.chunk(self.split_proj(fused), chunks=2, dim=1)
         refined = f1 * F.gelu(self.refine_dw(f2))
-        return x + self.scale * self.out_proj(refined)
+        return x + self._positive_scale(self.raw_scale) * self.out_proj(refined)
 
 
 class ASSARefine(nn.Module):
