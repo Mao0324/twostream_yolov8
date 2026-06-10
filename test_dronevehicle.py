@@ -24,8 +24,10 @@ def parse_args():
     parser.add_argument("--device", type=str, default="0", help="CUDA device, e.g. 0 or 0,1")
     parser.add_argument("--project", type=str, default=None, help="Output project directory")
     parser.add_argument("--name", type=str, default="test_dronevehicle", help="Run name")
+    parser.add_argument("--split", type=str, default="test", choices=["val", "test"], help="Dataset split to evaluate")
     parser.add_argument("--conf", type=float, default=0.001, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.7, help="NMS IoU threshold")
+    parser.add_argument("--no-rect", action="store_true", help="Disable rectangular evaluation batches")
     return parser.parse_args()
 
 
@@ -38,7 +40,7 @@ def main():
 
     metrics = model.val(
         data=args.data,
-        split="test",
+        split=args.split,
         imgsz=args.imgsz,
         batch=args.batch,
         device=args.device,
@@ -46,6 +48,7 @@ def main():
         name=args.name,
         conf=args.conf,
         iou=args.iou,
+        rect=not args.no_rect,
         task="obb",
     )
     print(metrics)
