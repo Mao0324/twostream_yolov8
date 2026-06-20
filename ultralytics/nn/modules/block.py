@@ -1709,22 +1709,47 @@ class ASSAAdd(nn.Module):
 class ASSARIFusion(nn.Module):
     """ASSA-style intermediate RGB/IR fusion, input [B, 2C, H, W], output [B, 2C, H, W]."""
 
-    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3, diff_scale=1e-3):
         super().__init__()
         self.c = c
         self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
         self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
         self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
 
+        hidden = max(8, c // reduction)
+        self.diff_gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c, hidden, kernel_size=1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, c, kernel_size=1, bias=True),
+            nn.Tanh(),
+        )
+        self.rgb_diff_proj = Conv(2 * c, c, k=1, s=1)
+        self.ir_diff_proj = Conv(2 * c, c, k=1, s=1)
+        self.diff_scale_rgb = nn.Parameter(torch.ones(1) * diff_scale)
+        self.diff_scale_ir = nn.Parameter(torch.ones(1) * diff_scale)
+
     def forward(self, x):
         """Fuse concatenated RGB/IR feature tensor."""
         rgb, ir = torch.chunk(x, chunks=2, dim=1)
         if rgb.shape[1] != self.c:
             raise ValueError(f"ASSARIFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
-        delta_rgb = self.xattn(rgb, ir)
-        delta_ir = self.xattn(ir, rgb)
-        rgb = rgb + self.scale_rgb * delta_rgb
-        ir = ir + self.scale_ir * delta_ir
+
+        delta_rgb_assa = self.xattn(rgb, ir)
+        delta_ir_assa = self.xattn(ir, rgb)
+
+        # Explicitly model directional RGB-IR differences to compensate complementary modality information
+        # and reduce modality contribution imbalance without changing spatial alignment or output shape.
+        weight_rgb = self.diff_gate(ir - rgb)
+        rgb_comp = weight_rgb * ir
+        delta_rgb_diff = self.rgb_diff_proj(torch.cat([rgb, rgb_comp], dim=1))
+
+        weight_ir = self.diff_gate(rgb - ir)
+        ir_comp = weight_ir * rgb
+        delta_ir_diff = self.ir_diff_proj(torch.cat([ir, ir_comp], dim=1))
+
+        rgb = rgb + self.scale_rgb * delta_rgb_assa + self.diff_scale_rgb * delta_rgb_diff
+        ir = ir + self.scale_ir * delta_ir_assa + self.diff_scale_ir * delta_ir_diff
         return torch.cat([rgb, ir], dim=1)
 
 
