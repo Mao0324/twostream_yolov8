@@ -170,6 +170,7 @@ class v8DetectionLoss:
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
+        self.head = m
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
         self.stride = m.stride  # model strides
@@ -711,6 +712,25 @@ class v8OBBLoss(v8DetectionLoss):
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
+
+        if hasattr(self.head, "illumination_estimator"):
+            logits = self.head.last_illumination_logits
+            if logits is None:
+                raise RuntimeError("IAFAOBB did not expose illumination logits for the auxiliary loss.")
+            if "illumination" in batch:
+                illumination_target = batch["illumination"].to(logits.device).long().view(-1)
+            else:
+                # DroneVehicle has no day/night field. Fall back to deterministic RGB-luminance pseudo labels.
+                rgb = batch["img"][:, :3]
+                luminance = (
+                    0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+                ).mean(dim=(1, 2))
+                # Class 0 is day/bright (RGB-favoured), class 1 is night/dark (IR-favoured).
+                illumination_target = (luminance < self.head.illum_threshold).long()
+            illumination_loss = torch.nn.functional.cross_entropy(logits, illumination_target)
+            illumination_loss = illumination_loss * self.head.illum_loss_gain
+            loss_items = torch.cat((loss.detach(), illumination_loss.detach().reshape(1)))
+            return (loss.sum() + illumination_loss) * batch_size, loss_items
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 

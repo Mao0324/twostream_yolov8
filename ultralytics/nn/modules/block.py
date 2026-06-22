@@ -44,6 +44,10 @@ __all__ = (
     "ASSAAdd",
     "ASSARIFusion",
     "ASSARefine",
+    "DifferentialModalityAwareFusion",
+    "DualC2fDMAF",
+    "DualSPPF",
+    "DualFPN",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1570,6 +1574,135 @@ class Bottleneck(nn.Module):
     def forward(self, x):
         """'forward()' applies the YOLO FPN to input data."""
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+
+class DifferentialModalityAwareFusion(nn.Module):
+    """Parameter-free DMAF compensation from the MBNet paper.
+
+    For each stream, the globally pooled directional modality difference is
+    squashed with tanh and used to recalibrate the complementary stream.  The
+    returned tensors are residual-function inputs; this module deliberately has
+    no trainable parameters.
+    """
+
+    def forward(self, rgb, ir):
+        """Return RGB/IR residual inputs after directional channel compensation."""
+        if rgb.shape != ir.shape:
+            raise ValueError(f"DMAF expects matching RGB/IR shapes, got {rgb.shape} and {ir.shape}.")
+        weight_rgb = torch.tanh((ir - rgb).mean(dim=(2, 3), keepdim=True))
+        weight_ir = torch.tanh((rgb - ir).mean(dim=(2, 3), keepdim=True))
+        return rgb + weight_rgb * ir, ir + weight_ir * rgb
+
+
+class DMAFBottleneckPair(nn.Module):
+    """A pair of symmetric bottlenecks with parameter-free DMAF inside each residual function."""
+
+    def __init__(self, c, shortcut=True, g=1, k=(3, 3)):
+        super().__init__()
+        self.dmaf = DifferentialModalityAwareFusion()
+        self.rgb_cv1 = Conv(c, c, k[0], 1)
+        self.rgb_cv2 = Conv(c, c, k[1], 1, g=g)
+        self.ir_cv1 = Conv(c, c, k[0], 1)
+        self.ir_cv2 = Conv(c, c, k[1], 1, g=g)
+        self.add = shortcut
+
+    def forward(self, rgb, ir):
+        """Apply DMAF and the two modality-specific residual functions."""
+        rgb_residual_input, ir_residual_input = self.dmaf(rgb, ir)
+        rgb_delta = self.rgb_cv2(self.rgb_cv1(rgb_residual_input))
+        ir_delta = self.ir_cv2(self.ir_cv1(ir_residual_input))
+        if self.add:
+            return rgb + rgb_delta, ir + ir_delta
+        return rgb_delta, ir_delta
+
+
+class DualC2fDMAF(nn.Module):
+    """Symmetric two-stream C2f with DMAF densely inserted in every bottleneck."""
+
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1_rgb = Conv(c1, 2 * self.c, 1, 1)
+        self.cv1_ir = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2_rgb = Conv((2 + n) * self.c, c2, 1)
+        self.cv2_ir = Conv((2 + n) * self.c, c2, 1)
+        self.blocks = nn.ModuleList(DMAFBottleneckPair(self.c, shortcut, g) for _ in range(n))
+
+    def forward(self, x):
+        """Process a concatenated [RGB, IR] tensor and preserve both streams."""
+        rgb, ir = torch.chunk(x, 2, dim=1)
+        rgb_features = list(self.cv1_rgb(rgb).chunk(2, 1))
+        ir_features = list(self.cv1_ir(ir).chunk(2, 1))
+        for block in self.blocks:
+            rgb_next, ir_next = block(rgb_features[-1], ir_features[-1])
+            rgb_features.append(rgb_next)
+            ir_features.append(ir_next)
+        rgb = self.cv2_rgb(torch.cat(rgb_features, 1))
+        ir = self.cv2_ir(torch.cat(ir_features, 1))
+        return torch.cat((rgb, ir), 1)
+
+
+class DualSPPF(nn.Module):
+    """Two independent SPPF branches that retain modality separation."""
+
+    def __init__(self, c1, c2, k=5):
+        super().__init__()
+        self.rgb = SPPF(c1, c2, k)
+        self.ir = SPPF(c1, c2, k)
+
+    def forward(self, x):
+        """Apply SPPF to a concatenated [RGB, IR] tensor."""
+        rgb, ir = torch.chunk(x, 2, dim=1)
+        return torch.cat((self.rgb(rgb), self.ir(ir)), 1)
+
+
+class _SingleStreamFPN(nn.Module):
+    """YOLOv8 P3-P5 FPN/PAN path used independently by one modality."""
+
+    def __init__(self, channels, n=1):
+        super().__init__()
+        c3, c4, c5 = channels
+        self.p4 = C2f(c5 + c4, c4, n=n, shortcut=False)
+        self.p3 = C2f(c4 + c3, c3, n=n, shortcut=False)
+        self.down4 = Conv(c3, c3, 3, 2)
+        self.out4 = C2f(c3 + c4, c4, n=n, shortcut=False)
+        self.down5 = Conv(c4, c4, 3, 2)
+        self.out5 = C2f(c4 + c5, c5, n=n, shortcut=False)
+
+    def forward(self, features):
+        """Build P3-P5 neck features without cross-modal collapse."""
+        p3, p4, p5 = features
+        n4 = self.p4(torch.cat((F.interpolate(p5, scale_factor=2, mode="nearest"), p4), 1))
+        n3 = self.p3(torch.cat((F.interpolate(n4, scale_factor=2, mode="nearest"), p3), 1))
+        o4 = self.out4(torch.cat((self.down4(n3), n4), 1))
+        o5 = self.out5(torch.cat((self.down5(o4), p5), 1))
+        return [n3, o4, o5]
+
+
+class DualFPN(nn.Module):
+    """Independent RGB and IR FPN/PAN necks; fusion is deferred to IAFAOBB."""
+
+    dual_feature_input = True
+
+    def __init__(self, channels, n=1):
+        super().__init__()
+        self.channels = tuple(channels)
+        self.rgb = _SingleStreamFPN(self.channels, n=n)
+        self.ir = _SingleStreamFPN(self.channels, n=n)
+
+    def forward(self, x):
+        """Accept three saved [RGB, IR] feature pairs and return six neck tensors."""
+        if not isinstance(x, (list, tuple)) or len(x) != 3:
+            raise ValueError("DualFPN expects P3/P4/P5 feature pairs.")
+        rgb_features, ir_features = [], []
+        for pair in x:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise ValueError("Each DualFPN input must be an [RGB, IR] pair.")
+            rgb_features.append(pair[0])
+            ir_features.append(pair[1])
+        rgb_out = self.rgb(rgb_features)
+        ir_out = self.ir(ir_features)
+        return rgb_out + ir_out
 
 
 class InvoConv(nn.Module):

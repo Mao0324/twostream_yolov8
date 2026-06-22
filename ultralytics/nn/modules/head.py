@@ -5,6 +5,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
@@ -14,7 +15,7 @@ from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "IAFAOBB", "RTDETRDecoder"
 
 
 class Detect(nn.Module):
@@ -149,6 +150,130 @@ class OBB(Detect):
     def decode_bboxes(self, bboxes, anchors):
         """Decode rotated bounding boxes."""
         return dist2rbox(bboxes, self.angle, anchors, dim=1)
+
+
+class ModalityAlignment(nn.Module):
+    """Predict bidirectional dense offsets and align RGB/IR features with bilinear sampling."""
+
+    def __init__(self, c, reduction=8, max_offset=4.0):
+        super().__init__()
+        hidden = max(16, c // reduction)
+        self.max_offset = float(max_offset)
+        self.offset = nn.Sequential(Conv(2 * c, hidden, 1, 1), nn.Conv2d(hidden, 4, 3, 1, 1))
+        nn.init.zeros_(self.offset[-1].weight)
+        nn.init.zeros_(self.offset[-1].bias)
+
+    @staticmethod
+    def _warp(x, offset):
+        """Warp x by pixel-space (dx, dy) offsets."""
+        b, _, h, w = x.shape
+        dtype, device = x.dtype, x.device
+        yy = (torch.arange(h, device=device, dtype=dtype) + 0.5) * (2.0 / h) - 1.0
+        xx = (torch.arange(w, device=device, dtype=dtype) + 0.5) * (2.0 / w) - 1.0
+        grid_y, grid_x = torch.meshgrid(yy, xx, indexing="ij")
+        base_grid = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0).expand(b, -1, -1, -1)
+        offset_x = offset[:, 0] * (2.0 / w)
+        offset_y = offset[:, 1] * (2.0 / h)
+        grid = base_grid + torch.stack((offset_x, offset_y), dim=-1)
+        return F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=False)
+
+    def forward(self, rgb, ir):
+        """Return bidirectionally aligned RGB and IR features."""
+        offsets = torch.tanh(self.offset(torch.cat((rgb, ir), 1))) * self.max_offset
+        return self._warp(rgb, offsets[:, :2]), self._warp(ir, offsets[:, 2:])
+
+
+class IlluminationAwareFeatureAlignment(nn.Module):
+    """IAFA feature stage: align, illumination-gate, propose, and complement RGB/IR features."""
+
+    def __init__(self, c, reduction=8, max_offset=4.0):
+        super().__init__()
+        self.alignment = ModalityAlignment(c, reduction=reduction, max_offset=max_offset)
+        self.rgb_complement = Conv(2 * c, c, 1, 1)
+        self.ir_complement = Conv(2 * c, c, 1, 1)
+
+    @staticmethod
+    def _l2_rescale(x, target_norm=10.0, eps=1e-6):
+        """Apply the channel-wise L2 rescaling used before MBNet illumination gating."""
+        return x * (target_norm / torch.sqrt(x.square().sum(dim=1, keepdim=True) + eps))
+
+    def forward(self, rgb, ir, rgb_weight):
+        """Return an IAFC-refined feature while retaining both streams until this final head stage."""
+        rgb, ir = self.alignment(rgb, ir)
+        rgb = self._l2_rescale(rgb)
+        ir = self._l2_rescale(ir)
+        wr = rgb_weight[:, :, None, None]
+        wt = 1.0 - wr
+
+        # AP-like approximate fused feature followed by illumination-aware modality complements.
+        proposal = wr * rgb + wt * ir
+        rgb_delta = self.rgb_complement(torch.cat((proposal, rgb), 1))
+        ir_delta = self.ir_complement(torch.cat((proposal, ir), 1))
+        return proposal + wr * rgb_delta + wt * ir_delta
+
+
+class IAFAOBB(OBB):
+    """OBB head that defers RGB/IR fusion until illumination-aware feature alignment."""
+
+    dual_feature_input = True
+    uses_rgb_illumination = True
+
+    def __init__(
+        self,
+        nc=80,
+        ne=1,
+        ch=(),
+        reduction=8,
+        max_offset=4.0,
+        illum_loss_gain=0.2,
+        illum_threshold=0.35,
+    ):
+        super().__init__(nc, ne, ch)
+        hidden = 32
+        self.illumination_estimator = nn.Sequential(
+            nn.Conv2d(3, 16, 5, 1, 2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(16, hidden, 3, 1, 1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.AdaptiveAvgPool2d(4),
+            nn.Flatten(),
+            nn.Linear(hidden * 4 * 4, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 32),
+            nn.ReLU(inplace=True),
+            nn.Linear(32, 2),
+        )
+        self.illumination_scale = nn.Parameter(torch.ones(1))
+        self.illumination_bias = nn.Parameter(torch.zeros(1))
+        self.iafa = nn.ModuleList(
+            IlluminationAwareFeatureAlignment(c, reduction=reduction, max_offset=max_offset) for c in ch
+        )
+        self.illum_loss_gain = float(illum_loss_gain)
+        self.illum_threshold = float(illum_threshold)
+        self.last_illumination_logits = None
+        self.last_illumination_weights = None
+
+    def forward(self, x, rgb_image=None):
+        """Align and illumination-gate paired RGB/IR neck features, then predict OBBs."""
+        if not isinstance(x, (list, tuple)) or len(x) != 2 * self.nl:
+            raise ValueError(f"IAFAOBB expects {2 * self.nl} tensors (RGB P3-P5 then IR P3-P5).")
+        rgb_features = list(x[: self.nl])
+        ir_features = list(x[self.nl :])
+
+        if rgb_image is None:
+            raise ValueError("IAFAOBB requires the original RGB image for illumination estimation.")
+        illumination_input = F.interpolate(rgb_image, size=(56, 56), mode="bilinear", align_corners=False)
+        logits = self.illumination_estimator(illumination_input)
+        # Positive logit difference means brighter/day-like input and therefore more RGB contribution.
+        rgb_weight = torch.sigmoid(
+            (logits[:, :1] - logits[:, 1:2]) * F.softplus(self.illumination_scale) + self.illumination_bias
+        )
+        self.last_illumination_logits = logits
+        self.last_illumination_weights = rgb_weight.detach()
+        fused = [module(rgb, ir, rgb_weight) for module, rgb, ir in zip(self.iafa, rgb_features, ir_features)]
+        return super().forward(fused)
 
 
 class Pose(Detect):

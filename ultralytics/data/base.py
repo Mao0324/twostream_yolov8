@@ -75,6 +75,19 @@ class BaseDataset(Dataset):
         self.fraction = fraction
         self.im_files = self.get_img_files(self.img_path)
         self.imir_files = self.get_img_files(self.imgir_path)
+        if len(self.im_files) != len(self.imir_files):
+            raise ValueError(
+                f"RGB/IR image counts differ: RGB={len(self.im_files)}, IR={len(self.imir_files)}. "
+                "Paired two-stream training requires one-to-one lists."
+            )
+        mismatches = [
+            (rgb, ir)
+            for rgb, ir in zip(self.im_files, self.imir_files)
+            if Path(rgb).stem != Path(ir).stem
+        ]
+        if mismatches:
+            rgb, ir = mismatches[0]
+            raise ValueError(f"RGB/IR pair stem mismatch: '{rgb}' vs '{ir}'.")
 
         self.labels = self.get_labels()
         #self.labelsir= self.get_irlabels()

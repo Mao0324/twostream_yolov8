@@ -14,6 +14,7 @@ from ultralytics.nn.modules import (
     C3,
     C3TR,
     OBB,
+    IAFAOBB,
     SPP,
     SPPELAN,
     SPPF,
@@ -54,6 +55,9 @@ from ultralytics.nn.modules import (
     ASSAAdd,
     ASSARIFusion,
     ASSARefine,
+    DualC2fDMAF,
+    DualSPPF,
+    DualFPN,
     ShuffleAttention,
     SimAM,
     GAM_Attention,
@@ -153,8 +157,23 @@ class BaseModel(nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt, embeddings = [], [], []  # outputs
+        is_dual_stream_model = any(
+            layer.f in {-3, -4} if isinstance(layer.f, int) else False for layer in self.model
+        )
+        if not is_dual_stream_model:
+            for m in self.model:
+                if m.f != -1:
+                    x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+                if profile:
+                    self._profile_one_layer(m, x, dt)
+                x = m(x)
+                y.append(x if m.i in self.save else None)
+                if visualize:
+                    feature_visualization(x, m.type, m.i, save_dir=visualize)
+            return x
         rgb,ir=torch.chunk(x,chunks=2,dim=1) # 红外
         # rgb=x[:, :3, :, :] # 可见光
+        rgb_input = rgb
         x=rgb
         # if(x.shape[1]==6) :
         #     # import matplotlib.pyplot as plt  
@@ -201,7 +220,9 @@ class BaseModel(nn.Module):
 
 
             
-            if m.f==-4:
+            if getattr(m, "dual_feature_input", False):
+                x = m(x, rgb_image=rgb_input) if getattr(m, "uses_rgb_illumination", False) else m(x)
+            elif m.f==-4:
                 # 跳转另外一个分支
                 if isR:
                     x= m(ir)
@@ -401,7 +422,10 @@ class DetectionModel(BaseModel):
   
             forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
             #计算步长修改
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(2, 6, s, s))])  # forward
+            build_channels = 6 if any(
+                layer.f in {-3, -4} if isinstance(layer.f, int) else False for layer in self.model
+            ) else ch
+            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(2, build_channels, s, s))])
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -1034,9 +1058,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         }:  
             
 
-            c1, c2 = ch[f], args[0]
-            if f==-4:
+            c2 = args[0]
+            if f == -4:
                 c1 = stream_ir_ch if parse_is_rgb else stream_rgb_ch
+            else:
+                c1 = ch[f]
                 
             # if f==-4:
             # #此时为下个backbonce,红外光
@@ -1075,6 +1101,36 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is ASSARefine:
             c2 = ch[f]
             args = [c2, *args]
+        elif m is DualC2fDMAF:
+            if stream_rgb_ch != stream_ir_ch:
+                raise ValueError(
+                    f"DualC2fDMAF requires equal stream channels, got RGB={stream_rgb_ch}, IR={stream_ir_ch}"
+                )
+            c1 = stream_rgb_ch
+            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            args = [c1, c2, n, *args[1:]]
+            n = 1
+        elif m is DualSPPF:
+            if stream_rgb_ch != stream_ir_ch:
+                raise ValueError(f"DualSPPF requires equal stream channels, got {stream_rgb_ch} and {stream_ir_ch}")
+            c1 = stream_rgb_ch
+            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            args = [c1, c2, *args[1:]]
+        elif m is DualFPN:
+            if not isinstance(f, list) or len(f) != 3:
+                raise ValueError("DualFPN expects three saved P3/P4/P5 pair-layer indices.")
+            channels = [ch[x] for x in f]
+            c2 = channels[0]
+            args = [channels, n]
+            n = 1
+        elif m is IAFAOBB:
+            source_layer = f if isinstance(f, int) else f[0]
+            source_module = layers[source_layer]
+            channels = getattr(source_module, "channels", None)
+            if channels is None:
+                raise ValueError("IAFAOBB must consume DualFPN output directly.")
+            c2 = channels[0]
+            args = [args[0], args[1], channels, *args[2:]]
         elif m is S2Attention:
             c1 = ch[f[0]]+ch[f[1]]
             c2 = ch[f[0]]

@@ -1,0 +1,37 @@
+# YOLOv8 two-stream OBB with MBNet-style dense DMAF and IAFA head.
+# RGB and IR remain separate through symmetric backbones and independent FPN/PAN necks.
+
+nc: 5
+scales:
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+scale: s
+
+backbone:
+  # Independent RGB/IR stems.
+  - [-1, 1, Conv, [64, 3, 2]]                    # 0 RGB P1/2
+  - [-1, 1, Conv, [128, 3, 2]]                   # 1 RGB P2/4
+  - [-4, 1, Conv, [64, 3, 2]]                    # 2 IR P1/2
+  - [-1, 1, Conv, [128, 3, 2]]                   # 3 IR P2/4
+
+  # Parameter-free DMAF is inserted inside every repeated residual bottleneck.
+  - [-3, 3, DualC2fDMAF, [128, True]]            # 4 paired P2/4
+  - [-4, 1, Conv, [256, 3, 2]]                   # 5 RGB P3/8
+  - [-4, 1, Conv, [256, 3, 2]]                   # 6 IR P3/8
+  - [-3, 6, DualC2fDMAF, [256, True]]            # 7 paired P3/8
+  - [-4, 1, Conv, [512, 3, 2]]                   # 8 RGB P4/16
+  - [-4, 1, Conv, [512, 3, 2]]                   # 9 IR P4/16
+  - [-3, 6, DualC2fDMAF, [512, True]]            # 10 paired P4/16
+  - [-4, 1, Conv, [1024, 3, 2]]                  # 11 RGB P5/32
+  - [-4, 1, Conv, [1024, 3, 2]]                  # 12 IR P5/32
+  - [-3, 3, DualC2fDMAF, [1024, True]]           # 13 paired P5/32
+  - [-3, 1, DualSPPF, [1024, 5]]                 # 14 paired P5/32 SPPF
+
+head:
+  # Two independent FPN/PAN paths. Each saved backbone item is an [RGB, IR] pair.
+  - [[7, 10, 14], 3, DualFPN, []]                # 15 -> RGB P3/P4/P5 + IR P3/P4/P5
+  # nc, angle channels, reduction, max alignment offset, illumination loss gain, day/night luminance threshold
+  - [-1, 1, IAFAOBB, [nc, 1, 8, 4.0, 0.2, 0.35]] # 16

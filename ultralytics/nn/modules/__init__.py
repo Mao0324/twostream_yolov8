@@ -52,6 +52,10 @@ from .block import (
     ASSAAdd,
     ASSARIFusion,
     ASSARefine,
+    DifferentialModalityAwareFusion,
+    DualC2fDMAF,
+    DualSPPF,
+    DualFPN,
     SimAM,
     ShuffleAttention,
     GAM_Attention,
@@ -95,7 +99,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect
+from .head import IAFAOBB, OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect
 from .transformer import (
     AIFI,
     MLP,
@@ -158,6 +162,7 @@ __all__ = (
     "MLP",
     "ResNetLayer",
     "OBB",
+    "IAFAOBB",
     "WorldDetect",
     "ImagePoolingAttn",
     "ContrastiveHead",
@@ -171,4 +176,8 @@ __all__ = (
     "ASSAAdd",
     "ASSARIFusion",
     "ASSARefine",
+    "DifferentialModalityAwareFusion",
+    "DualC2fDMAF",
+    "DualSPPF",
+    "DualFPN",
 )
