@@ -14,8 +14,7 @@ results = model.train(
     batch=64,
     epochs=100,
     imgsz=640,
-    device='2,3',
-    project='dronevehicle_runs_assafusion_c2f_fusion_conv_close_mosaic=10',
-    task='obb',
-    close_mosaic=10
+    device='5,7',
+    project='dronevehicle_runs_assafusion_c2f_fusion_conv_MBNet',
+    task='obb'
 )
