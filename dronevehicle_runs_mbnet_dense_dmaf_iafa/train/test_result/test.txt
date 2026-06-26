@@ -1,0 +1,29 @@
+(spikeyolo) ubuntu@ubuntu-B760M-H-DDR4:~/MCONG/MCONG/twostream_yolov8$ python test_dronevehicle.py --weights /home/ubuntu/MCONG/MCONG/twostream_yolov8/dronevehicle_runs_mbnet_dense_dmaf_iafa/train/weights/best.pt --project /home/ubuntu/MCONG/MCONG/twostream_yolov8/dronevehicle_runs_mbnet_dense_dmaf_iafa/train  --name test_result
+Ultralytics YOLOv8.1.47 🚀 Python-3.9.0 torch-2.0.0+cu117 CUDA:0 (NVIDIA GeForce RTX 3090, 24135MiB)
+YOLOv8_twostream_obb_mbnet summary (fused): 340 layers, 21968130 parameters, 0 gradients, 58.4 GFLOPs
+val: Scanning /home/ubuntu/MCONG/datasets/DroneVehicle_twostream/labels/test.cache... 8980 imag
+                 Class     Images  Instances      Box(P          R      mAP50  mAP50-95): 100%|
+                   all       8980     159614      0.807      0.806      0.842      0.708
+                   car       8980     137146       0.95       0.97      0.986      0.844
+                 truck       8980       8657      0.781      0.808      0.852      0.697
+                   bus       8980       4467      0.932      0.945      0.968      0.837
+                   van       8980       4282      0.704      0.611      0.687      0.574
+           freight_car       8980       5062      0.666      0.698      0.718      0.587
+Speed: 0.1ms preprocess, 4.4ms inference, 0.0ms loss, 1.0ms postprocess per image
+前向传播 FPS:228.23
+Results saved to /home/ubuntu/MCONG/MCONG/twostream_yolov8/dronevehicle_runs_mbnet_dense_dmaf_iafa/train/test_result2
+ultralytics.utils.metrics.OBBMetrics object with attributes:
+
+ap_class_index: array([0, 1, 2, 3, 4])
+box: ultralytics.utils.metrics.Metric object
+confusion_matrix: <ultralytics.utils.metrics.ConfusionMatrix object at 0x7f58a5a6b880>
+curves: []
+curves_results: []
+fitness: 0.721199139722758
+keys: ['metrics/precision(B)', 'metrics/recall(B)', 'metrics/mAP50(B)', 'metrics/mAP50-95(B)']
+maps: array([    0.84353,     0.69701,     0.83703,      0.5739,      0.5873])
+names: {0: 'car', 1: 'truck', 2: 'bus', 3: 'van', 4: 'freight_car'}
+plot: True
+results_dict: {'metrics/precision(B)': 0.8067904305372139, 'metrics/recall(B)': 0.8064298487039803, 'metrics/mAP50(B)': 0.8422110189890043, 'metrics/mAP50-95(B)': 0.7077533753598417, 'fitness': 0.721199139722758}
+save_dir: PosixPath('/home/ubuntu/MCONG/MCONG/twostream_yolov8/dronevehicle_runs_mbnet_dense_dmaf_iafa/train/test_result2')
+speed: {'preprocess': 0.1475951188391195, 'inference': 4.3815842184563785, 'loss': 0.0003193162862866918, 'postprocess': 0.9979841969326505}

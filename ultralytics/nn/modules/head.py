@@ -15,7 +15,7 @@ from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "IAFAOBB", "RTDETRDecoder"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "IAFAFusion", "IAFAOBB", "RTDETRDecoder"
 
 
 class Detect(nn.Module):
@@ -212,6 +212,59 @@ class IlluminationAwareFeatureAlignment(nn.Module):
         return proposal + wr * rgb_delta + wt * ir_delta
 
 
+class IAFAFusion(nn.Module):
+    """中文：FPN前IAFA融合层，输入paired RGB/IR特征，先估计照明权重，再做空间对齐和自适应融合，输出单流特征。"""
+
+    dual_feature_input = True
+    uses_rgb_illumination = True
+    starts_single_stream_head = True
+
+    def __init__(self, c, reduction=8, max_offset=4.0):
+        super().__init__()
+        hidden = 32
+        self.illumination_estimator = nn.Sequential(
+            nn.Conv2d(3, 16, 5, 1, 2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(16, hidden, 3, 1, 1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.AdaptiveAvgPool2d(4),
+            nn.Flatten(),
+            nn.Linear(hidden * 4 * 4, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 32),
+            nn.ReLU(inplace=True),
+            nn.Linear(32, 2),
+        )
+        self.illumination_scale = nn.Parameter(torch.ones(1))
+        self.illumination_bias = nn.Parameter(torch.zeros(1))
+        self.iafa = IlluminationAwareFeatureAlignment(c, reduction=reduction, max_offset=max_offset)
+        self.last_illumination_logits = None
+        self.last_illumination_weights = None
+
+    def clear_runtime_cache(self):
+        """Drop forward-only tensors so model copying never retains an autograd graph."""
+        self.last_illumination_logits = None
+        self.last_illumination_weights = None
+
+    def forward(self, x, rgb_image=None):
+        """Fuse one saved [RGB, IR] feature pair into a single feature map before FPN/PAN."""
+        if not isinstance(x, (list, tuple)) or len(x) != 2:
+            raise ValueError("IAFAFusion expects one saved [RGB, IR] feature pair.")
+        if rgb_image is None:
+            raise ValueError("IAFAFusion requires the original RGB image for illumination estimation.")
+        rgb, ir = x
+        illumination_input = F.interpolate(rgb_image, size=(56, 56), mode="bilinear", align_corners=False)
+        logits = self.illumination_estimator(illumination_input)
+        rgb_weight = torch.sigmoid(
+            (logits[:, :1] - logits[:, 1:2]) * F.softplus(self.illumination_scale) + self.illumination_bias
+        )
+        self.last_illumination_logits = logits
+        self.last_illumination_weights = rgb_weight.detach()
+        return self.iafa(rgb, ir, rgb_weight)
+
+
 class IAFAOBB(OBB):
     """OBB head that defers RGB/IR fusion until illumination-aware feature alignment."""
 
@@ -252,6 +305,11 @@ class IAFAOBB(OBB):
         )
         self.illum_loss_gain = float(illum_loss_gain)
         self.illum_threshold = float(illum_threshold)
+        self.last_illumination_logits = None
+        self.last_illumination_weights = None
+
+    def clear_runtime_cache(self):
+        """Drop forward-only tensors so model copying never retains an autograd graph."""
         self.last_illumination_logits = None
         self.last_illumination_weights = None
 

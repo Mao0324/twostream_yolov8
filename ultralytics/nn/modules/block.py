@@ -43,11 +43,15 @@ __all__ = (
     "SparseCrossChannelAttention2d",
     "ASSAAdd",
     "ASSARIFusion",
+    "ASSADMAFFusion",
     "ASSARefine",
     "DifferentialModalityAwareFusion",
     "DualC2fDMAF",
+    "DualC2fDMAF_FasterIR",
+    "DualC2fLastDMAF_FasterIR",
     "DualSPPF",
     "DualFPN",
+    "DualFeatureSelect",
     "SimAM",
     "ShuffleAttention",
     "GAM_Attention",
@@ -1642,6 +1646,125 @@ class DualC2fDMAF(nn.Module):
         return torch.cat((rgb, ir), 1)
 
 
+class DMAFBottleneckPairFasterIR(nn.Module):
+    """A paired DMAF bottleneck with a standard RGB branch and Faster_Block IR branch."""
+
+    def __init__(self, c, shortcut=True, g=1):
+        super().__init__()
+        self.dmaf = DifferentialModalityAwareFusion()
+        self.rgb_cv1 = Conv(c, c, 3, 1)
+        self.rgb_cv2 = Conv(c, c, 3, 1, g=g)
+        self.ir_fast = Faster_Block(c, c)
+        self.add = shortcut
+
+    def forward(self, rgb, ir):
+        """Apply DMAF, then process RGB with Conv bottleneck and IR with Faster_Block."""
+        rgb_residual_input, ir_residual_input = self.dmaf(rgb, ir)
+        rgb_delta = self.rgb_cv2(self.rgb_cv1(rgb_residual_input))
+        ir_delta = self.ir_fast(ir_residual_input)
+        if self.add:
+            return rgb + rgb_delta, ir_delta
+        return rgb_delta, ir_delta
+
+
+class DualC2fDMAF_FasterIR(nn.Module):
+    """DualC2fDMAF variant that keeps RGB Conv bottlenecks and uses Faster_Block for IR."""
+
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1_rgb = Conv(c1, 2 * self.c, 1, 1)
+        self.cv1_ir = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2_rgb = Conv((2 + n) * self.c, c2, 1)
+        self.cv2_ir = Conv((2 + n) * self.c, c2, 1)
+        self.blocks = nn.ModuleList(DMAFBottleneckPairFasterIR(self.c, shortcut, g) for _ in range(n))
+
+    def forward(self, x):
+        """Process concatenated [RGB, IR] features while using a lighter IR residual path."""
+        rgb, ir = torch.chunk(x, 2, dim=1)
+        rgb_features = list(self.cv1_rgb(rgb).chunk(2, 1))
+        ir_features = list(self.cv1_ir(ir).chunk(2, 1))
+        for block in self.blocks:
+            rgb_next, ir_next = block(rgb_features[-1], ir_features[-1])
+            rgb_features.append(rgb_next)
+            ir_features.append(ir_next)
+        rgb = self.cv2_rgb(torch.cat(rgb_features, 1))
+        ir = self.cv2_ir(torch.cat(ir_features, 1))
+        return torch.cat((rgb, ir), 1)
+
+
+class NonDMAFBottleneckPairFasterIR(nn.Module):
+    """中文：非DMAF双流瓶颈，RGB使用普通Conv瓶颈，IR使用Faster_Block轻量瓶颈。"""
+
+    def __init__(self, c, shortcut=True, g=1):
+        super().__init__()
+        self.rgb_cv1 = Conv(c, c, 3, 1)
+        self.rgb_cv2 = Conv(c, c, 3, 1, g=g)
+        self.ir_fast = Faster_Block(c, c)
+        self.add = shortcut
+
+    def forward(self, rgb, ir):
+        """Process RGB/IR independently without cross-modal DMAF interaction."""
+        rgb_delta = self.rgb_cv2(self.rgb_cv1(rgb))
+        ir_delta = self.ir_fast(ir)
+        if self.add:
+            return rgb + rgb_delta, ir_delta
+        return rgb_delta, ir_delta
+
+
+class LastDMAFBottleneckPairFasterIR(nn.Module):
+    """中文：末端DMAF双流瓶颈，先做RGB/IR差异补偿，RGB走Conv瓶颈，IR走Faster_Block。"""
+
+    def __init__(self, c, shortcut=True, g=1):
+        super().__init__()
+        self.dmaf = DifferentialModalityAwareFusion()
+        self.rgb_cv1 = Conv(c, c, 3, 1)
+        self.rgb_cv2 = Conv(c, c, 3, 1, g=g)
+        self.ir_fast = Faster_Block(c, c)
+        self.add = shortcut
+
+    def forward(self, rgb, ir):
+        """Apply DMAF only in this final stage bottleneck, then process each modality."""
+        rgb_residual_input, ir_residual_input = self.dmaf(rgb, ir)
+        rgb_delta = self.rgb_cv2(self.rgb_cv1(rgb_residual_input))
+        ir_delta = self.ir_fast(ir_residual_input)
+        if self.add:
+            return rgb + rgb_delta, ir_delta
+        return rgb_delta, ir_delta
+
+
+class DualC2fLastDMAF_FasterIR(nn.Module):
+    """中文：C2f末端DMAF消融模块，前n-1个瓶颈不融合，最后1个瓶颈才做DMAF；RGB为Conv瓶颈，IR为Faster_Block。"""
+
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1_rgb = Conv(c1, 2 * self.c, 1, 1)
+        self.cv1_ir = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2_rgb = Conv((2 + n) * self.c, c2, 1)
+        self.cv2_ir = Conv((2 + n) * self.c, c2, 1)
+        self.blocks = nn.ModuleList(
+            NonDMAFBottleneckPairFasterIR(self.c, shortcut, g) for _ in range(max(n - 1, 0))
+        )
+        self.last_dmaf = LastDMAFBottleneckPairFasterIR(self.c, shortcut, g)
+
+    def forward(self, x):
+        """Process concatenated [RGB, IR] features with DMAF only in the last bottleneck."""
+        rgb, ir = torch.chunk(x, 2, dim=1)
+        rgb_features = list(self.cv1_rgb(rgb).chunk(2, 1))
+        ir_features = list(self.cv1_ir(ir).chunk(2, 1))
+        for block in self.blocks:
+            rgb_next, ir_next = block(rgb_features[-1], ir_features[-1])
+            rgb_features.append(rgb_next)
+            ir_features.append(ir_next)
+        rgb_next, ir_next = self.last_dmaf(rgb_features[-1], ir_features[-1])
+        rgb_features.append(rgb_next)
+        ir_features.append(ir_next)
+        rgb = self.cv2_rgb(torch.cat(rgb_features, 1))
+        ir = self.cv2_ir(torch.cat(ir_features, 1))
+        return torch.cat((rgb, ir), 1)
+
+
 class DualSPPF(nn.Module):
     """Two independent SPPF branches that retain modality separation."""
 
@@ -1654,6 +1777,25 @@ class DualSPPF(nn.Module):
         """Apply SPPF to a concatenated [RGB, IR] tensor."""
         rgb, ir = torch.chunk(x, 2, dim=1)
         return torch.cat((self.rgb(rgb), self.ir(ir)), 1)
+
+
+class DualFeatureSelect(nn.Module):
+    """Select one tensor from a saved [RGB, IR] feature pair."""
+
+    dual_feature_input = True
+    starts_single_stream_head = True
+
+    def __init__(self, index=0):
+        super().__init__()
+        if index not in (0, 1):
+            raise ValueError(f"DualFeatureSelect index must be 0 for RGB or 1 for IR, got {index}.")
+        self.index = int(index)
+
+    def forward(self, x):
+        """Return RGB or IR tensor from a two-item feature pair."""
+        if not isinstance(x, (list, tuple)) or len(x) != 2:
+            raise ValueError("DualFeatureSelect expects a saved [RGB, IR] feature pair.")
+        return x[self.index]
 
 
 class _SingleStreamFPN(nn.Module):
@@ -1883,6 +2025,42 @@ class ASSARIFusion(nn.Module):
 
         rgb = rgb + self.scale_rgb * delta_rgb_assa + self.diff_scale_rgb * delta_rgb_diff
         ir = ir + self.scale_ir * delta_ir_assa + self.diff_scale_ir * delta_ir_diff
+        return torch.cat([rgb, ir], dim=1)
+
+
+class ASSADMAFFusion(nn.Module):
+    """中文：ASSA + DMAF 融合模块，输入/输出均为 [B, 2C, H, W]。
+
+    结构说明：
+    - 先把输入按通道切成 RGB/IR 两路特征。
+    - 使用无参数 DMAF 根据 RGB/IR 差异做互补补偿。
+    - 在补偿后的特征上执行 ASSA 跨通道注意力。
+    - 删除 ASSARIFusion 原有的 diff_gate/rgb_diff_proj/ir_diff_proj 分支。
+    """
+
+    def __init__(self, c, reduction=8, heads=4, norm_attn=True, init_scale=1e-3):
+        super().__init__()
+        self.c = c
+        self.dmaf = DifferentialModalityAwareFusion()
+        self.xattn = SparseCrossChannelAttention2d(c, reduction, heads, norm_attn, init_scale)
+        self.scale_rgb = nn.Parameter(torch.ones(1) * init_scale)
+        self.scale_ir = nn.Parameter(torch.ones(1) * init_scale)
+
+    def forward(self, x):
+        """中文：先做无参数 DMAF 差异补偿，再做 ASSA 注意力增强。"""
+        rgb, ir = torch.chunk(x, chunks=2, dim=1)
+        if rgb.shape[1] != self.c:
+            raise ValueError(f"ASSADMAFFusion expected {self.c} channels per stream, got {rgb.shape[1]}.")
+
+        # DMAF 不引入可学习参数，只根据两路特征的通道差异做互补补偿。
+        rgb_dmaf, ir_dmaf = self.dmaf(rgb, ir)
+
+        # ASSA 在补偿后的 RGB/IR 特征上建模跨模态通道关系。
+        delta_rgb_assa = self.xattn(rgb_dmaf, ir_dmaf)
+        delta_ir_assa = self.xattn(ir_dmaf, rgb_dmaf)
+
+        rgb = rgb_dmaf + self.scale_rgb * delta_rgb_assa
+        ir = ir_dmaf + self.scale_ir * delta_ir_assa
         return torch.cat([rgb, ir], dim=1)
 
 
@@ -3243,5 +3421,3 @@ class RIFusion(nn.Module):
   
 #         x1=x*y
 #         return x+torch.cat((x1[:,self.c1//2:,...],x1[:,:self.c1//2,...]),dim=1)
-
-

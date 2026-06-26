@@ -1,0 +1,90 @@
+# YOLOv8 two-stream OBB 消融版：P2保持baseline，P3/P4/P5只在每个stage最后一个bottleneck做DMAF。
+#
+# 消融目的：
+# - P2阶段不使用DMAF，恢复为baseline的 RGB=C2f、IR=C2f_Faster，减少浅层过早跨模态扰动。
+# - P3/P4/P5阶段使用 DualC2fLastDMAF_FasterIR：
+#   前 n-1 个bottleneck：RGB普通Conv瓶颈，IR使用Faster_Block，不做跨模态融合。
+#   最后 1 个bottleneck：先做DMAF差异补偿，再RGB走Conv瓶颈、IR走Faster_Block。
+# - 保留 ASSARIFusion 作为stage后跨模态增强。
+# - 保留双流FPN/PAN和 IAFAOBB 作为最终照明感知对齐融合检测头。
+
+nc: 5
+scales:
+  #n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+scale: s
+
+backbone:
+  # RGB/IR stem：保持双流输入，各自下采样到P2/4。
+  - [-1, 1, Conv, [64, 3, 2]]                       # 0 RGB P1/2
+  - [-1, 1, Conv, [128, 3, 2]]                      # 1 RGB P2/4
+  - [-4, 1, Conv, [64, 3, 2]]                       # 2 IR P1/2
+  - [-1, 1, Conv, [128, 3, 2]]                      # 3 IR P2/4
+
+  # P2消融：不使用DMAF，恢复baseline的RGB=C2f、IR=C2f_Faster。
+  - [-4, 3, C2f, [128, True]]                       # 4 RGB P2/4 baseline C2f
+  - [-4, 3, C2f_Faster, [128, True]]                # 5 IR P2/4 baseline C2f_Faster
+
+  # P3消融：前5个bottleneck不做DMAF，最后1个bottleneck做DMAF；随后保留ASSARIFusion。
+  - [-4, 1, Conv, [256, 3, 2]]                      # 6 RGB P3/8
+  - [-4, 1, Conv, [256, 3, 2]]                      # 7 IR P3/8
+  - [-3, 6, DualC2fLastDMAF_FasterIR, [256, True]]  # 8 paired P3/8, last bottleneck uses DMAF
+  - [-3, 1, ASSARIFusion, [256, 8, 4, True]]        # 9 P3/8 ASSA stage-level fusion
+
+  # P4消融：前5个bottleneck不做DMAF，最后1个bottleneck做DMAF；随后保留ASSARIFusion。
+  - [-4, 1, Conv, [512, 3, 2]]                      # 10 RGB P4/16
+  - [-4, 1, Conv, [512, 3, 2]]                      # 11 IR P4/16
+  - [-3, 6, DualC2fLastDMAF_FasterIR, [512, True]]  # 12 paired P4/16, last bottleneck uses DMAF
+  - [-3, 1, ASSARIFusion, [512, 8, 4, True]]        # 13 P4/16 ASSA stage-level fusion
+
+  # P5消融：前2个bottleneck不做DMAF，最后1个bottleneck做DMAF；随后双流SPPF和ASSARIFusion。
+  - [-4, 1, Conv, [1024, 3, 2]]                     # 14 RGB P5/32
+  - [-4, 1, Conv, [1024, 3, 2]]                     # 15 IR P5/32
+  - [-3, 3, DualC2fLastDMAF_FasterIR, [1024, True]] # 16 paired P5/32, last bottleneck uses DMAF
+  - [-4, 1, SPPF, [1024, 5]]                        # 17 RGB P5/32 SPPF
+  - [-4, 1, SPPF, [1024, 5]]                        # 18 IR P5/32 SPPF
+  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]]       # 19 P5/32 ASSA stage-level fusion
+
+head:
+  # 从ASSA增强后的paired特征中取出RGB/IR，进入双流neck。
+  # DualFeatureSelect index: 0 = RGB, 1 = IR。
+  - [9, 1, DualFeatureSelect, [0]]                  # 20 RGB P3/8
+  - [13, 1, DualFeatureSelect, [0]]                 # 21 RGB P4/16
+  - [19, 1, DualFeatureSelect, [0]]                 # 22 RGB P5/32
+  - [9, 1, DualFeatureSelect, [1]]                  # 23 IR P3/8
+  - [13, 1, DualFeatureSelect, [1]]                 # 24 IR P4/16
+  - [19, 1, DualFeatureSelect, [1]]                 # 25 IR P5/32
+
+  # RGB FPN/PAN neck：普通YOLOv8 neck，仅处理RGB特征。
+  - [22, 1, nn.Upsample, [None, 2, "nearest"]]      # 26 RGB P5 -> P4
+  - [[-1, 21], 1, Concat, [1]]                      # 27 RGB concat P4
+  - [-1, 3, C2f, [512]]                             # 28 RGB FPN P4
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]      # 29 RGB P4 -> P3
+  - [[-1, 20], 1, Concat, [1]]                      # 30 RGB concat P3
+  - [-1, 3, C2f, [256]]                             # 31 RGB out P3
+  - [-1, 1, Conv, [256, 3, 2]]                      # 32 RGB P3 -> P4
+  - [[-1, 28], 1, Concat, [1]]                      # 33 RGB concat PAN P4
+  - [-1, 3, C2f, [512]]                             # 34 RGB out P4
+  - [-1, 1, Conv, [512, 3, 2]]                      # 35 RGB P4 -> P5
+  - [[-1, 22], 1, Concat, [1]]                      # 36 RGB concat PAN P5
+  - [-1, 3, C2f, [1024]]                            # 37 RGB out P5
+
+  # IR FPN/PAN neck：普通YOLOv8 neck，仅处理IR特征。
+  - [25, 1, nn.Upsample, [None, 2, "nearest"]]      # 38 IR P5 -> P4
+  - [[-1, 24], 1, Concat, [1]]                      # 39 IR concat P4
+  - [-1, 3, C2f, [512]]                             # 40 IR FPN P4
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]      # 41 IR P4 -> P3
+  - [[-1, 23], 1, Concat, [1]]                      # 42 IR concat P3
+  - [-1, 3, C2f, [256]]                             # 43 IR out P3
+  - [-1, 1, Conv, [256, 3, 2]]                      # 44 IR P3 -> P4
+  - [[-1, 40], 1, Concat, [1]]                      # 45 IR concat PAN P4
+  - [-1, 3, C2f, [512]]                             # 46 IR out P4
+  - [-1, 1, Conv, [512, 3, 2]]                      # 47 IR P4 -> P5
+  - [[-1, 25], 1, Concat, [1]]                      # 48 IR concat PAN P5
+  - [-1, 3, C2f, [1024]]                            # 49 IR out P5
+
+  # 最终融合：IAFAOBB根据原始RGB估计照明权重，对RGB/IR P3-P5做空间对齐和自适应融合。
+  - [[31, 34, 37, 43, 46, 49], 1, IAFAOBB, [nc, 1, 8, 4.0, 0.2, 0.35]] # 50

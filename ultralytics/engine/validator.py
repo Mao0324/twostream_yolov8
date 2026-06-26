@@ -155,8 +155,10 @@ class BaseValidator:
             
             #ir图像位置
             # irpath='/home/mjy/ultralytics/datasets/OBB/image/val'
-            strir=Path(self.data.get(self.args.split)).name+'_ir'
-            self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split),self.data.get(strir), self.args.batch)
+            ir_split = f"{self.args.split}_ir"
+            self.dataloader = self.dataloader or self.get_dataloader(
+                self.data.get(self.args.split), self.data.get(ir_split), self.args.batch
+            )
 
             model.eval()
             for i in range(1000):

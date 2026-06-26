@@ -1,0 +1,70 @@
+# YOLOv8 two-stream OBB 消融版：IAFA-before-FPN 融合。
+#
+# 消融目的：
+# - P2阶段不使用DMAF，保持baseline：RGB=C2f，IR=C2f_Faster。
+# - P3/P4/P5阶段使用 DualC2fLastDMAF_FasterIR：
+#   前 n-1 个bottleneck不做跨模态融合，最后1个bottleneck才做DMAF。
+# - 每个stage后保留 ASSARIFusion 做中期跨模态增强。
+# - 用 IAFAFusion 替代 baseline 的 ADD：在进入FPN前完成RGB/IR空间对齐和照明感知融合。
+# - IAFAFusion 后是普通单流FPN/PAN + 普通OBB，用于观察“IAFA作为ADD替代项”的消融效果。
+
+nc: 5
+scales:
+  #n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+scale: s
+
+backbone:
+  # RGB/IR stem：保持双流输入，各自下采样到P2/4。
+  - [-1, 1, Conv, [64, 3, 2]]                       # 0 RGB P1/2
+  - [-1, 1, Conv, [128, 3, 2]]                      # 1 RGB P2/4
+  - [-4, 1, Conv, [64, 3, 2]]                       # 2 IR P1/2
+  - [-1, 1, Conv, [128, 3, 2]]                      # 3 IR P2/4
+
+  # P2消融：不使用DMAF，恢复baseline的RGB=C2f、IR=C2f_Faster。
+  - [-4, 3, C2f, [128, True]]                       # 4 RGB P2/4 baseline C2f
+  - [-4, 3, C2f_Faster, [128, True]]                # 5 IR P2/4 baseline C2f_Faster
+
+  # P3：last-DMAF FasterIR + ASSA，再用IAFAFusion替代ADD融合成单流P3。
+  - [-4, 1, Conv, [256, 3, 2]]                      # 6 RGB P3/8
+  - [-4, 1, Conv, [256, 3, 2]]                      # 7 IR P3/8
+  - [-3, 6, DualC2fLastDMAF_FasterIR, [256, True]]  # 8 paired P3/8, only last bottleneck uses DMAF
+  - [-3, 1, ASSARIFusion, [256, 8, 4, True]]        # 9 P3/8 ASSA stage-level fusion
+  - [-1, 1, IAFAFusion, [8, 4.0]]                   # 10 P3/8 IAFA-before-FPN fused feature
+
+  # P4：last-DMAF FasterIR + ASSA，再用IAFAFusion替代ADD融合成单流P4。
+  - [-4, 1, Conv, [512, 3, 2]]                      # 11 RGB P4/16
+  - [-4, 1, Conv, [512, 3, 2]]                      # 12 IR P4/16
+  - [-3, 6, DualC2fLastDMAF_FasterIR, [512, True]]  # 13 paired P4/16, only last bottleneck uses DMAF
+  - [-3, 1, ASSARIFusion, [512, 8, 4, True]]        # 14 P4/16 ASSA stage-level fusion
+  - [-1, 1, IAFAFusion, [8, 4.0]]                   # 15 P4/16 IAFA-before-FPN fused feature
+
+  # P5：last-DMAF FasterIR + 双流SPPF + ASSA，再用IAFAFusion替代ADD融合成单流P5。
+  - [-4, 1, Conv, [1024, 3, 2]]                     # 16 RGB P5/32
+  - [-4, 1, Conv, [1024, 3, 2]]                     # 17 IR P5/32
+  - [-3, 3, DualC2fLastDMAF_FasterIR, [1024, True]] # 18 paired P5/32, only last bottleneck uses DMAF
+  - [-4, 1, SPPF, [1024, 5]]                        # 19 RGB P5/32 SPPF
+  - [-4, 1, SPPF, [1024, 5]]                        # 20 IR P5/32 SPPF
+  - [-3, 1, ASSARIFusion, [1024, 8, 4, True]]       # 21 P5/32 ASSA stage-level fusion
+  - [-1, 1, IAFAFusion, [8, 4.0]]                   # 22 P5/32 IAFA-before-FPN fused feature
+
+head:
+  # 单流FPN/PAN：输入已经由IAFAFusion融合为P3/P4/P5单流特征。
+  - [22, 1, nn.Upsample, [None, 2, "nearest"]]      # 23 P5 -> P4
+  - [[-1, 15], 1, Concat, [1]]                      # 24 concat P4
+  - [-1, 3, C2f, [512]]                             # 25 FPN P4
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]      # 26 P4 -> P3
+  - [[-1, 10], 1, Concat, [1]]                      # 27 concat P3
+  - [-1, 3, C2f, [256]]                             # 28 out P3
+  - [-1, 1, Conv, [256, 3, 2]]                      # 29 P3 -> P4
+  - [[-1, 25], 1, Concat, [1]]                      # 30 concat PAN P4
+  - [-1, 3, C2f, [512]]                             # 31 out P4
+  - [-1, 1, Conv, [512, 3, 2]]                      # 32 P4 -> P5
+  - [[-1, 22], 1, Concat, [1]]                      # 33 concat PAN P5
+  - [-1, 3, C2f, [1024]]                            # 34 out P5
+
+  # 普通OBB检测头：此版本不使用IAFAOBB，专门观察FPN前IAFA融合效果。
+  - [[28, 31, 34], 1, OBB, [nc, 1]]                 # 35

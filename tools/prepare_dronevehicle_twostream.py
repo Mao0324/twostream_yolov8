@@ -47,41 +47,41 @@ def parse_args() -> argparse.Namespace:
     # 原始图像目录（每个目录里同时包含 RGB 与 IR）
     parser.add_argument(
         "--train-images",
-        default="/home/biiteam/Storage-4T/biiteam/WBY/datasets/DroneVehicle_SMFDet2/train_images/png_images",
+        default="/home/ubuntu/MCONG/datasets/DroneVehicle_yolo/train_images/png_images",
         help="训练集图像目录（包含 RGB 与 IR）",
     )
     parser.add_argument(
         "--test-images",
-        default="/home/biiteam/Storage-4T/biiteam/WBY/datasets/DroneVehicle_SMFDet2/test_images/png_images",
+        default="/home/ubuntu/MCONG/datasets/DroneVehicle_yolo/test_images/png_images",
         help="测试集图像目录（包含 RGB 与 IR）",
     )
     parser.add_argument(
         "--val-images",
-        default="/home/biiteam/Storage-4T/biiteam/WBY/datasets/DroneVehicle_SMFDet2/val_images/png_images",
+        default="/home/ubuntu/MCONG/datasets/DroneVehicle_SMFDet2/val_images/png_images",
         help="验证集图像目录（包含 RGB 与 IR）",
     )
 
     # 目标标签目录（已转好的 YOLO-OBB）
     parser.add_argument(
         "--train-labels",
-        default="/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehiclelabels_obb/train_labels",
+        default="/home/ubuntu/MCONG/datasets/dronevehiclelabels_obb/train_labels",
         help="训练集标签目录（ir_*.txt）",
     )
     parser.add_argument(
         "--test-labels",
-        default="/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehiclelabels_obb/test_labels",
+        default="/home/ubuntu/MCONG/datasets/dronevehiclelabels_obb/test_labels",
         help="测试集标签目录（ir_*.txt）",
     )
     parser.add_argument(
         "--val-labels",
-        default="/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehiclelabels_obb/val_labels",
+        default="/home/ubuntu/MCONG/datasets/dronevehiclelabels_obb/val_labels",
         help="验证集标签目录（ir_*.txt）",
     )
 
     # 输出根目录
     parser.add_argument(
         "--out-root",
-        default="/home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream",
+        default="/home/ubuntu/MCONG/datasets/dronevehicle_twostream",
         help="输出数据根目录",
     )
 

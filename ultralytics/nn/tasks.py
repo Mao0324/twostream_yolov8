@@ -14,6 +14,7 @@ from ultralytics.nn.modules import (
     C3,
     C3TR,
     OBB,
+    IAFAFusion,
     IAFAOBB,
     SPP,
     SPPELAN,
@@ -53,9 +54,13 @@ from ultralytics.nn.modules import (
     Concat2,
     ADD,
     ASSAAdd,
+    ASSADMAFFusion,
     ASSARIFusion,
     ASSARefine,
     DualC2fDMAF,
+    DualC2fDMAF_FasterIR,
+    DualC2fLastDMAF_FasterIR,
+    DualFeatureSelect,
     DualSPPF,
     DualFPN,
     ShuffleAttention,
@@ -205,7 +210,14 @@ class BaseModel(nn.Module):
         
 
         isR=True # 当前是否为RGB
-        dual_stream_until = next((layer.i for layer in self.model if isinstance(layer, (ADD, ASSAAdd))), len(self.model))
+        dual_stream_until = next(
+            (
+                layer.i
+                for layer in self.model
+                if isinstance(layer, (ADD, ASSAAdd)) or getattr(layer, "starts_single_stream_head", False)
+            ),
+            len(self.model),
+        )
 
         for m in self.model:
             
@@ -428,6 +440,9 @@ class DetectionModel(BaseModel):
             m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(2, build_channels, s, s))])
             self.stride = m.stride
             m.bias_init()  # only run once
+            for module in self.model.modules():
+                if hasattr(module, "clear_runtime_cache"):
+                    module.clear_runtime_cache()
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
 
@@ -990,7 +1005,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         return module_name if isinstance(module_name, str) else getattr(module_name, "__name__", str(module_name))
 
     first_add_i = next(
-        (i for i, (_, _, module_name, _) in enumerate(layer_defs) if module_name_of(module_name) in {"ADD", "ASSAAdd"}),
+        (
+            i
+            for i, (_, _, module_name, _) in enumerate(layer_defs)
+            if module_name_of(module_name) in {"ADD", "ASSAAdd", "DualFeatureSelect"}
+        ),
         len(layer_defs),
     )
 
@@ -1101,10 +1120,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is ASSARefine:
             c2 = ch[f]
             args = [c2, *args]
-        elif m is DualC2fDMAF:
+        elif m is IAFAFusion:
+            c2 = ch[f]
+            args = [c2, *args]
+        elif m in {DualC2fDMAF, DualC2fDMAF_FasterIR, DualC2fLastDMAF_FasterIR}:
             if stream_rgb_ch != stream_ir_ch:
                 raise ValueError(
-                    f"DualC2fDMAF requires equal stream channels, got RGB={stream_rgb_ch}, IR={stream_ir_ch}"
+                    f"{m.__name__} requires equal stream channels, got RGB={stream_rgb_ch}, IR={stream_ir_ch}"
                 )
             c1 = stream_rgb_ch
             c2 = make_divisible(min(args[0], max_channels) * width, 8)
@@ -1116,6 +1138,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1 = stream_rgb_ch
             c2 = make_divisible(min(args[0], max_channels) * width, 8)
             args = [c1, c2, *args[1:]]
+        elif m is DualFeatureSelect:
+            c2 = ch[f]
         elif m is DualFPN:
             if not isinstance(f, list) or len(f) != 3:
                 raise ValueError("DualFPN expects three saved P3/P4/P5 pair-layer indices.")
@@ -1124,11 +1148,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [channels, n]
             n = 1
         elif m is IAFAOBB:
-            source_layer = f if isinstance(f, int) else f[0]
-            source_module = layers[source_layer]
-            channels = getattr(source_module, "channels", None)
-            if channels is None:
-                raise ValueError("IAFAOBB must consume DualFPN output directly.")
+            if isinstance(f, list):
+                if len(f) != 6:
+                    raise ValueError("IAFAOBB list input expects RGB P3/P4/P5 and IR P3/P4/P5 feature layers.")
+                rgb_channels = [ch[x] for x in f[:3]]
+                ir_channels = [ch[x] for x in f[3:]]
+                if rgb_channels != ir_channels:
+                    raise ValueError(f"IAFAOBB RGB/IR channels must match, got {rgb_channels} and {ir_channels}.")
+                channels = rgb_channels
+            else:
+                source_module = layers[f]
+                channels = getattr(source_module, "channels", None)
+                if channels is None:
+                    raise ValueError("IAFAOBB must consume DualFPN output or six explicit RGB/IR feature layers.")
             c2 = channels[0]
             args = [args[0], args[1], channels, *args[2:]]
         elif m is S2Attention:
@@ -1137,7 +1169,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1,c2] 
         elif m is RIFusion:
             args = [args[0]] 
-        elif m is ASSARIFusion:
+        elif m in {ASSARIFusion, ASSADMAFFusion}:
             c2 = stream_rgb_ch
             args = [c2, *args[1:]]
         elif m is Silence:
