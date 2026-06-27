@@ -38,9 +38,9 @@ def _torch_load_trusted_checkpoint(*args, **kwargs):
     return _TORCH_LOAD(*args, **kwargs)
 
 
-DEFAULT_SOURCE = Path("/home/ubuntu/MCONG/MCONG/twostream_yolov8/pre-trained/yolov8s-obb.pt")
-DEFAULT_TARGET_YAML = Path("/home/ubuntu/MCONG/MCONG/twostream_yolov8/yaml/yolov8_twostream_obb_assafusion_postc2f_iafa_before_fpn_lastdmaf_fasterir_p2c2f.yaml")
-DEFAULT_OUTPUT = Path("/home/ubuntu/MCONG/MCONG/twostream_yolov8/pre-trained/yolov8s-obb_twostream.pt")
+DEFAULT_SOURCE = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
+DEFAULT_TARGET_YAML = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion_postc2f_iafa_before_fpn_lastdmaf_fasterir_p2c2f.yaml")
+DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt")
 
 # single-stream yolov8s(-obb) layer index -> legacy ASSA two-stream RGB branch layer index
 LEGACY_SINGLE_TO_TWOSTREAM_RGB = {
