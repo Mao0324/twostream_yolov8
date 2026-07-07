@@ -2,13 +2,13 @@
 """Create two-stream OBB weights from single-stream YOLOv8s-OBB weights.
 
 Default paths use this repository checkout:
-  source: /home/ubuntu/MCONG/MCONG/twostream_yolov8/pre-trained/yolov8s-obb.pt
-  output: /home/ubuntu/MCONG/MCONG/twostream_yolov8/pre-trained/yolov8s-obb_twostream_mbnet.pt
+  source: /media/biiteam/新加卷/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt
+  output: /media/biiteam/新加卷/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_pc2f_mpf.pt
 
 Usage:
   python tools/make_twostream_obb_weights.py \
-      --target-yaml /home/ubuntu/MCONG/MCONG/twostream_yolov8/yaml/yolov8_twostream_obb_mbnet.yaml \
-      --output /home/ubuntu/MCONG/MCONG/twostream_yolov8/pre-trained/yolov8s-obb_twostream_mbnet.pt
+      --target-yaml /media/biiteam/新加卷/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s.yaml \
+      --output /media/biiteam/新加卷/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_pc2f_mpf.pt
 """
 
 from __future__ import annotations
@@ -35,12 +35,18 @@ _TORCH_LOAD = torch.load
 def _torch_load_trusted_checkpoint(*args, **kwargs):
     """Load trusted local YOLO checkpoints across PyTorch versions."""
     kwargs.setdefault("weights_only", False)
-    return _TORCH_LOAD(*args, **kwargs)
+    try:
+        return _TORCH_LOAD(*args, **kwargs)
+    except TypeError as exc:
+        if "weights_only" not in str(exc):
+            raise
+        kwargs.pop("weights_only", None)
+        return _TORCH_LOAD(*args, **kwargs)
 
 
-DEFAULT_SOURCE = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
-DEFAULT_TARGET_YAML = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/yaml/yolov8_twostream_obb_assafusion_postc2f_iafa_before_fpn_lastdmaf_fasterir_p2c2f.yaml")
-DEFAULT_OUTPUT = Path("/home/biiteam/Storage-4T/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_twostream.pt")
+DEFAULT_SOURCE = Path("/media/biiteam/新加卷/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb.pt")
+DEFAULT_TARGET_YAML = Path("/media/biiteam/新加卷/biiteam/MCONG/TwoStream_Yolov8_2/yaml/PC2f_MPF_yolov8s.yaml")
+DEFAULT_OUTPUT = Path("/media/biiteam/新加卷/biiteam/MCONG/TwoStream_Yolov8_2/pre-trained/yolov8s-obb_pc2f_mpf.pt")
 
 # single-stream yolov8s(-obb) layer index -> legacy ASSA two-stream RGB branch layer index
 LEGACY_SINGLE_TO_TWOSTREAM_RGB = {
@@ -288,6 +294,38 @@ ASSA_IAFA_BEFORE_FPN_LASTDMAF_FASTIR_P2C2F_LAYOUT = {
     "head": 35,
 }
 
+PC2F_MPF_LAYOUT = {
+    "rgb_backbone": {
+        0: 0,
+        1: 1,
+        2: 2,
+        3: 3,
+        4: 9,
+        5: 10,
+        6: 14,
+        7: 15,
+        8: 19,
+        9: 20,
+    },
+    "ir_compatible": {
+        0: 4,
+        1: 5,
+        3: 7,
+        5: 12,
+        7: 17,
+        9: 22,
+    },
+    "neck": {
+        12: 28,
+        15: 31,
+        16: 32,
+        18: 34,
+        19: 35,
+        21: 37,
+    },
+    "head": 38,
+}
+
 
 def _initialize_mbnet_target(src_sd: dict, dst_sd: dict, layout: dict = MBNET_LAYOUT) -> int:
     """Initialize dense-DMAF dual backbones, dual necks, and the final OBB predictor."""
@@ -396,6 +434,20 @@ def _initialize_iafa_before_fpn_target(src_sd: dict, dst_sd: dict, layout: dict,
     return copied
 
 
+def _initialize_pc2f_mpf_target(src_sd: dict, dst_sd: dict, layout: dict = PC2F_MPF_LAYOUT) -> int:
+    """Initialize PC2f/MPF RIFusion two-stream OBB layouts from YOLOv8s-OBB weights."""
+    copied = 0
+    for src_idx, dst_idx in layout["rgb_backbone"].items():
+        copied += _copy_prefix(src_sd, dst_sd, f"model.{src_idx}.", [f"model.{dst_idx}."], f"PC2f_MPF RGB {src_idx}->{dst_idx}")
+    for src_idx, dst_idx in layout["ir_compatible"].items():
+        copied += _copy_prefix(src_sd, dst_sd, f"model.{src_idx}.", [f"model.{dst_idx}."], f"PC2f_MPF IR {src_idx}->{dst_idx}")
+    for src_idx, dst_idx in layout["neck"].items():
+        copied += _copy_prefix(src_sd, dst_sd, f"model.{src_idx}.", [f"model.{dst_idx}."], f"PC2f_MPF neck {src_idx}->{dst_idx}")
+
+    copied += _copy_obb_head(src_sd, dst_sd, layout["head"], f"OBB 22->OBB {layout['head']}")
+    return copied
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build two-stream OBB checkpoint from single-stream OBB checkpoint.")
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="Single-stream .pt checkpoint path.")
@@ -411,6 +463,7 @@ def main() -> int:
             "assa_dmaf_iafa",
             "assa_lastdmaf_fasterir_p2c2f",
             "assa_iafa_before_fpn_lastdmaf_fasterir_p2c2f",
+            "pc2f_mpf",
         ),
         default="auto",
         help="Weight mapping layout. 'auto' detects supported two-stream YAML layouts by module names.",
@@ -450,6 +503,8 @@ def main() -> int:
             architecture = "mbnet_expanded"
         elif "DualC2fDMAF" in yaml_text and "IAFAOBB" in yaml_text:
             architecture = "mbnet"
+        elif "RIFusion" in yaml_text and "C2f_Faster" in yaml_text and "OBB" in yaml_text:
+            architecture = "pc2f_mpf"
         else:
             architecture = "legacy"
     print(f"[INFO] mapping architecture: {architecture}")
@@ -479,6 +534,9 @@ def main() -> int:
             "assa_iafa_before_fpn_lastdmaf_fasterir_p2c2f",
         )
         print(f"[assa_iafa_before_fpn_lastdmaf_fasterir_p2c2f total] copied={copied}")
+    elif architecture == "pc2f_mpf":
+        copied = _initialize_pc2f_mpf_target(src_sd, dst_sd)
+        print(f"[pc2f_mpf total] copied={copied}")
     else:
         # Legacy ASSA/RIFusion layouts retained for reproducibility of existing experiments.
         _copy_with_layer_map(src_sd, dst_sd, LEGACY_SINGLE_TO_TWOSTREAM_RGB, "single->twostream_rgb")

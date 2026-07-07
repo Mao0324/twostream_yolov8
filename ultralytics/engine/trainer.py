@@ -27,6 +27,7 @@ from ultralytics.utils import (
     DEFAULT_CFG,
     LOGGER,
     RANK,
+    ROOT,
     TQDM,
     __version__,
     callbacks,
@@ -188,7 +189,10 @@ class BaseTrainer:
             cmd, file = generate_ddp_command(world_size, self)
             try:
                 LOGGER.info(f'{colorstr("DDP:")} debug command {" ".join(cmd)}')
-                subprocess.run(cmd, check=True)
+                env = os.environ.copy()
+                repo_root = str(ROOT.parent)
+                env["PYTHONPATH"] = repo_root + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else repo_root
+                subprocess.run(cmd, check=True, env=env)
             except Exception as e:
                 raise e
             finally:

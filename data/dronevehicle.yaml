@@ -15,7 +15,7 @@
 #
 # Then this YAML can be used directly for train/val/test.
 
-path: /home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream
+path: /media/biiteam/新加卷/biiteam/MCONG/datasets/DroneVehicle_twostream
 
 train: images/train
 val: images/val
@@ -23,7 +23,7 @@ test: images/test
 
 train_ir: image/train
 val_ir: image/val
-test_ir: /home/biiteam/Storage-4T/biiteam/MCONG/datasets/dronevehicle_twostream/image/test
+test_ir: /media/biiteam/新加卷/biiteam/MCONG/datasets/DroneVehicle_twostream/image/test
 
 names:
   0: car
